@@ -24,6 +24,10 @@ It answers three questions for every bundler cluster:
 
 …and how much they made: realized PnL in SOL (fees and Jito tips included), win rate, open bags.
 
+For every token it also builds an **Axiom-style holder panel** (`bh token <MINT>`):
+**Top 10 H., Dev H., Snipers H., Insiders, Bundlers**. These are used as entry filters, and
+as an exit signal when insiders and bundlers unload.
+
 ## Read this first: what the code can and cannot do
 
 * **You cannot be "first in the bundle" of somebody else.** A Jito bundle is built
@@ -57,7 +61,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 30 offline tests
+pytest                      # 37 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -100,7 +104,49 @@ bh cluster <CLUSTER_ID|WALLET> # which / when / with whom, wallet list with fund
 What "in the black" means is set in `[selection]`: minimum launches, closed
 launches, win rate, total PnL, and that they don't dump too fast to follow.
 
-### 3. Backtest (walk-forward)
+### 3. Check a token like on Axiom
+
+```bash
+bh token <MINT>              # analyzes the launch if needed, then live balances via RPC
+bh token <MINT> --wallets    # the wallets behind every number, their funders, top-10 tags
+bh token <MINT> --json
+bh token <MINT> --db-only    # no RPC: holdings estimated from stored trades
+```
+
+Example output (illustrative numbers):
+
+```
+PEPE NewMintPEPE
+created 10 min ago by devX9   holdings: live (RPC)
+
+               wallets  held now  at launch
+Top 10 H.           10     23.4%
+Dev H.               1      2.0%       2.0%
+Snipers H.           2      1.9%       1.9%
+Insiders             5     10.0%      15.0%
+Bundlers             2      6.5%      11.5%
+Linked (all)         6     12.0%      14.5%
+
+Dev cluster C-MotherX: 10 wallets, 4 launches, win 100%, pnl +13.50 SOL -> IN THE BLACK (copied)
+Entry filters: pass
+```
+
+These are our own definitions. Axiom does not publish its formulas, so numbers can differ:
+
+| row | wallets counted |
+|---|---|
+| **Top 10 H.** | 10 largest holders, without the bonding curve, AMM pools and lockers (program-owned, off-curve addresses) and the burn address |
+| **Dev H.** | the creator |
+| **Bundlers** | bought in the create slot (inside the dev's Jito bundle), or in an early slot where ≥ `bundle_min_wallets_per_slot` wallets bought at once |
+| **Snipers H.** | every other buyer in the launch window (create slot + `early_slots`) |
+| **Insiders** | linked to the dev: same cluster; funded by the dev, a bundler, or the dev's own funder; the dev's funder itself; or received the token by transfer from dev / bundlers / insiders (the "distribution" wallets) |
+| **Linked (all)** | dev + bundlers + insiders, each wallet counted once |
+
+"Held now" is % of total supply from live balances. "At launch" is what the group bought in
+the launch window; for insiders it also includes tokens handed to them. Rows can overlap:
+a bundle wallet funded by the dev is a bundler **and** an insider.
+
+### 4. Backtest (walk-forward)
 
 ```bash
 bh backtest --split 0.7 [--mode dip|snipe]
@@ -110,7 +156,7 @@ Clusters are scored on the oldest 70% of launches only, then the strategy is
 replayed on the newest 30%, so no cluster is picked using the launches it is tested
 on. Use `analyze --full` so the replay has the whole early price path.
 
-### 4. Paper trade, then go live with small size
+### 5. Paper trade, then go live with small size
 
 ```bash
 bh run                         # paper: records launches, analyzes, rebuilds clusters, trades on paper
@@ -152,6 +198,12 @@ Watch opens when a wallet of a black cluster creates or buys a token. With
 `feed.funder_lookup_on_create = true`, a fresh dev wallet funded by a known cluster
 wallet also opens a watch (2 RPC calls per launch).
 
+The holder panel is computed `panel_delay_s` (3 s) after the watch opens. That
+costs about `2 + launch-window txs + up to max_quick_funders × 2` RPC calls, so raise
+`requests_per_second` on a paid plan. It is refreshed every `panel_refresh_s`. While top 10,
+dev, snipers, insiders or bundlers are above their `max_*_pct`, entry is blocked (the
+entry window bounds the wait).
+
 Cancelled (no entry) when:
 - the token still has a mint or freeze authority;
 - the bundle holds more than `max_cluster_supply_pct` of supply;
@@ -165,10 +217,15 @@ above `max_entry_vs_bundle` × the bundle's average entry. Limits:
 
 **Exit:** whichever comes first:
 1. the cluster sells `exit_on_cluster_sell_pct` of its bag after our entry;
-2. take profit;
-3. stop loss;
-4. optional trailing stop;
-5. `max_hold_s`.
+2. dev + bundlers + insiders together hold `exit_on_linked_drop_pct` less than at our
+   entry (catches dumps from wallets outside the copied cluster, too);
+3. take profit;
+4. stop loss;
+5. optional trailing stop;
+6. `max_hold_s`.
+
+The backtest skips the holder panel, because stored trades can't give exact balances at
+every moment.
 
 All parameters are in `config.example.toml`.
 
@@ -178,6 +235,7 @@ All parameters are in `config.example.toml`.
 |---|---|
 | `parser.py` | jsonParsed tx → trades / token transfers / SOL transfers / Jito tips / created mints. Works by diffing balances, not by decoding each program, so it handles pump.fun, PumpSwap, Raydium, WSOL routes and multi-signer bundle txs |
 | `analyzer.py` | launch analysis (create slot, bundle, snipers), wallet profiling + funder, seeding, auto pipeline with a cheap 1-call prefilter |
+| `holders.py` | Axiom-style holder panel: group classification, live balances via associated token accounts, top 10 without pools |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |
 | `execution.py` | `PaperBroker`, `LiveBroker` (PumpPortal tx + local signing + Jito bundle + RPC fallback) |

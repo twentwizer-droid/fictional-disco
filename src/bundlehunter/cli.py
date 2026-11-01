@@ -16,9 +16,11 @@ from .clusters import build_clusters
 from .config import Config, load_config
 from .execution import LiveBroker, PaperBroker, load_keypair
 from .feeds import PumpPortalFeed
+from .holders import LABELS, HolderScanner, format_panel
 from .rpc import SolanaRpc
 from .runner import BotRunner
 from .storage import Store
+from .strategy import Strategy
 
 
 def _rpc(cfg: Config) -> SolanaRpc:
@@ -77,6 +79,68 @@ async def cmd_scan(cfg: Config, store: Store, args: argparse.Namespace) -> None:
             _print_launch(r)
     finally:
         await rpc.close()
+
+
+async def cmd_token(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Axiom-style panel: Top 10 H. / Dev H. / Snipers H. / Insiders / Bundlers."""
+    rpc = _rpc(cfg)
+    try:
+        an = Analyzer(rpc, store, cfg.analyzer)
+        tok = store.token(args.mint)
+        if not args.db_only and (args.refresh or not tok or tok["status"] not in ("ok", "partial")):
+            report = await an.analyze_launch(args.mint, profile=not args.fast)
+            if report.status == "error":
+                sys.exit(f"{args.mint}: {report.note}")
+        index = build_clusters(store, cfg.clusters)
+        scanner = HolderScanner(rpc, store, an, cfg.clusters)
+        panel = await scanner.panel(args.mint, index.wallet_to_cluster, live=not args.db_only, analyze=False)
+    finally:
+        await rpc.close()
+
+    blocked = Strategy(cfg.strategy, {}, set()).panel_block(panel.metrics())
+    cluster = index.clusters.get(panel.cluster_id or "")
+    if args.json:
+        out = {
+            "mint": panel.mint,
+            "creator": panel.creator,
+            "supply": panel.supply,
+            "source": panel.source,
+            "metrics": panel.metrics(),
+            "groups": {
+                g: {"wallets": sorted(grp.wallets), "held": grp.held, "initial": grp.initial}
+                for g, grp in panel.groups.items()
+            },
+            "top10": panel.top10,
+            "dev_cluster": cluster.to_dict(cfg.selection) if cluster else None,
+            "entry_filters": blocked or "ok",
+        }
+        print(json.dumps(out, indent=2))
+        return
+    print(format_panel(panel))
+    print()
+    if cluster:
+        reasons = cluster.black_reasons(cfg.selection)
+        print(
+            f"Dev cluster {cluster.cluster_id}: {len(cluster.wallets)} wallets, {len(cluster.launches)} launches, "
+            f"win {cluster.win_rate:.0%}, pnl {cluster.realized_pnl:+.2f} SOL -> "
+            + ("IN THE BLACK (copied)" if not reasons else "not copied: " + "; ".join(reasons))
+        )
+    print(f"Entry filters: {'blocked - ' + blocked if blocked else 'pass'}")
+    if args.wallets:
+        funders = store.funders_of(sorted(panel.holdings) or sorted(set().union(*(g.wallets for g in panel.groups.values()))))
+        for g in ("dev", "bundlers", "snipers", "insiders"):
+            grp = panel.groups[g]
+            if not grp.wallets:
+                continue
+            print(f"\n{LABELS[g]}:")
+            for w in sorted(grp.wallets, key=lambda x: -panel.holdings.get(x, 0.0)):
+                held = panel.pct(panel.holdings.get(w, 0.0))
+                print(f"  {w}  held {held:.2%}  funder={funders.get(w, '?')}" if held is not None else f"  {w}")
+        if panel.top10:
+            print("\nTop 10 holders (excl. curve/pools/burn):")
+            for owner, amount in panel.top10:
+                tags = [LABELS[g] for g in ("dev", "bundlers", "snipers", "insiders") if owner in panel.groups[g].wallets]
+                print(f"  {owner}  {panel.pct(amount):.2%}  {', '.join(tags)}")
 
 
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
@@ -161,7 +225,9 @@ async def cmd_run(cfg: Config, store: Store, args: argparse.Namespace) -> None:
         broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol)
         logging.info("paper trading (no real orders). Use --live to trade for real.")
     analyzer = None if args.no_analyze else Analyzer(analysis_rpc, store, cfg.analyzer)
-    runner = BotRunner(cfg, store, trade_rpc, broker, PumpPortalFeed(cfg.feed.pumpportal_ws), analyzer)
+    # the holder panel is on the trading path, so it uses the trading RPC client
+    scanner = HolderScanner(trade_rpc, store, Analyzer(trade_rpc, store, cfg.analyzer), cfg.clusters)
+    runner = BotRunner(cfg, store, trade_rpc, broker, PumpPortalFeed(cfg.feed.pumpportal_ws), analyzer, scanner)
     try:
         await runner.run()
     finally:
@@ -201,6 +267,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--limit", type=int, default=50)
     s.add_argument("--min-age", type=float, default=None, help="seconds since launch (default from config)")
 
+    s = sub.add_parser("token", help="Axiom-style holder panel: top 10 / dev / snipers / insiders / bundlers")
+    s.add_argument("mint")
+    s.add_argument("--wallets", action="store_true", help="list the wallets behind every number")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--refresh", action="store_true", help="re-analyze the launch first")
+    s.add_argument("--fast", action="store_true", help="skip full wallet profiles (funders via quick lookups only)")
+    s.add_argument("--db-only", action="store_true", help="no RPC: holdings estimated from stored trades")
+
     s = sub.add_parser("clusters", help="rank bundler clusters by realized PnL")
     s.add_argument("--top", type=int, default=30)
     s.add_argument("--all", action="store_true", help="include single-launch clusters")
@@ -235,6 +309,7 @@ def main(argv: list[str] | None = None) -> None:
         "analyze": cmd_analyze,
         "seed": cmd_seed,
         "scan": cmd_scan,
+        "token": cmd_token,
         "clusters": cmd_clusters,
         "cluster": cmd_cluster,
         "backtest": cmd_backtest,

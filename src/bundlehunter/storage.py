@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS wallets (
     funded_sol REAL,
     history_complete INTEGER,
     tx_count INTEGER,
+    full_profile INTEGER NOT NULL DEFAULT 1,  -- 0 = only the funder was looked up
     profiled_at REAL
 );
 CREATE INDEX IF NOT EXISTS wallets_funder ON wallets(funder);
@@ -130,6 +131,13 @@ class Store:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(wallets)")}
+        if "full_profile" not in cols:
+            self.db.execute("ALTER TABLE wallets ADD COLUMN full_profile INTEGER NOT NULL DEFAULT 1")
+            self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -202,6 +210,10 @@ class Store:
     def transfers(self) -> list[tuple[str, str, str]]:
         return [(r["mint"], r["src"], r["dst"]) for r in self.db.execute("SELECT mint, src, dst FROM transfers")]
 
+    def transfers_for_mint(self, mint: str) -> list[tuple[str, str, float, int]]:
+        rows = self.db.execute("SELECT src, dst, amount, slot FROM transfers WHERE mint = ? ORDER BY slot", (mint,))
+        return [(r["src"], r["dst"], r["amount"] or 0.0, r["slot"] or 0) for r in rows]
+
     # -- roles -----------------------------------------------------------------
 
     def replace_roles(self, mint: str, rows: Iterable[tuple[str, str, int, bool]]) -> None:
@@ -239,6 +251,20 @@ class Store:
     def wallet(self, address: str) -> dict[str, Any] | None:
         row = self.db.execute("SELECT * FROM wallets WHERE address = ?", (address,)).fetchone()
         return dict(row) if row else None
+
+    def funders_of(self, wallets: Sequence[str]) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for chunk in _chunks(list(wallets)):
+            q = f"SELECT address, funder FROM wallets WHERE funder IS NOT NULL AND address IN ({','.join('?' * len(chunk))})"
+            out.update({r["address"]: r["funder"] for r in self.db.execute(q, list(chunk))})
+        return out
+
+    def funded_counts(self, funders: Sequence[str]) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for chunk in _chunks(list(funders)):
+            q = f"SELECT funder, COUNT(*) AS n FROM wallets WHERE funder IN ({','.join('?' * len(chunk))}) GROUP BY funder"
+            out.update({r["funder"]: r["n"] for r in self.db.execute(q, list(chunk))})
+        return out
 
     def funders(self) -> dict[str, str]:
         rows = self.db.execute("SELECT address, funder FROM wallets WHERE funder IS NOT NULL").fetchall()

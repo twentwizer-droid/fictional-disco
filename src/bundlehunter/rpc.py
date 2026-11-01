@@ -108,6 +108,19 @@ class SolanaRpc:
         res = await self.call("getAccountInfo", [address, {"encoding": "jsonParsed", "commitment": "confirmed"}])
         return (res or {}).get("value")
 
+    async def get_multiple_accounts(self, addresses: list[str]) -> list[dict[str, Any] | None]:
+        out: list[dict[str, Any] | None] = []
+        for i in range(0, len(addresses), 100):
+            res = await self.call(
+                "getMultipleAccounts", [addresses[i : i + 100], {"encoding": "jsonParsed", "commitment": "confirmed"}]
+            )
+            out.extend((res or {}).get("value") or [None] * len(addresses[i : i + 100]))
+        return out
+
+    async def get_token_largest_accounts(self, mint: str) -> list[dict[str, Any]]:
+        res = await self.call("getTokenLargestAccounts", [mint, {"commitment": "confirmed"}])
+        return (res or {}).get("value") or []
+
     async def get_token_supply(self, mint: str) -> float | None:
         res = await self.call("getTokenSupply", [mint])
         value = (res or {}).get("value") or {}

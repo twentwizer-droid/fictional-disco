@@ -36,6 +36,22 @@ class FakeFeed:
             yield ev
 
 
+class FakeScanner:
+    def __init__(self):
+        self.calls = []
+
+    async def panel(self, mint, wallet_to_cluster, **kw):
+        from bundlehunter.holders import Group, TokenPanel
+
+        self.calls.append((mint, kw))
+        groups = {g: Group(held=1e8) for g in ("dev", "bundlers", "snipers", "insiders", "linked")}
+        groups["dev"].held = 0.0
+        return TokenPanel(mint, 1e9, "dev", None, groups, {}, [("w", 1e8)], "rpc")
+
+    async def refresh(self, panel):
+        return panel
+
+
 class FakeRpc:
     async def get_parsed_account(self, mint):
         info = {"mintAuthority": None, "freezeAuthority": None, "supply": "1000000000000000", "decimals": 6}
@@ -59,7 +75,9 @@ def test_runner_records_watches_and_trades_end_to_end():
     ]
     feed = FakeFeed(events)
     cfg = Config()
-    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed)
+    cfg.strategy.panel_delay_s = 0
+    scanner = FakeScanner()
+    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed, scanner=scanner)
 
     async def go():
         await runner.rebuild()
@@ -70,6 +88,8 @@ def test_runner_records_watches_and_trades_end_to_end():
 
     asyncio.run(go())
     assert store.token(MINT)["creator"] == "dev"  # launch recorded for later analysis
+    assert scanner.calls == [(MINT, {"live": True, "profile": False, "final": False, "token_program": None,
+                                     "supply": 1e9})]
     assert MINT in feed.tokens and MINT in feed.unsubscribed
     (pos,) = store.positions()
     assert pos["reason_open"].startswith("dip") and pos["reason_close"].startswith("bundle selling")

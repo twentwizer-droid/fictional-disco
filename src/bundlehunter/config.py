@@ -23,11 +23,14 @@ class RpcConfig:
 
 @dataclass
 class AnalyzerConfig:
-    early_slots: int = 3  # buys in create_slot+1..+N are "snipers", create_slot itself is "bundle"
+    early_slots: int = 3  # launch window: create slot .. create slot + N
+    bundle_min_wallets_per_slot: int = 3  # early slot with >= N buyers = bundle too (0: create slot only)
     max_mint_sig_pages: int = 10  # 1000 signatures per page
     max_wallet_sig_pages: int = 2
     max_wallet_txs: int = 150  # newest txs fetched per profiled wallet
     min_funding_sol: float = 0.05  # ignore dust (address-poisoning) when finding a wallet's funder
+    quick_funder_sigs: int = 100  # funder-only lookup: wallets with longer histories are skipped
+    max_quick_funders: int = 40  # per token, for the insiders check
     profile_snipers: bool = False
     max_full_txs: int = 3000  # `analyze --full`: oldest N txs of the token (price path for backtests)
     # cheap prefilter used for automatically recorded launches
@@ -74,8 +77,19 @@ class StrategyConfig:
     abort_if_cluster_sold_pct: float = 0.15  # bundle already sold 15% -> it is dumping, stay out
     max_cluster_supply_pct: float = 0.6  # bundle holds > 60% of supply -> too much dump risk
     require_token_checks: bool = True  # mint + freeze authority must be revoked
+    # Axiom-style holder panel, "% of supply held now" (1.0 = filter off). Costs ~1-3 s of RPC
+    # after launch, so with require_holder_panel=true even snipe mode waits for it.
+    require_holder_panel: bool = True
+    panel_delay_s: float = 3.0  # let the launch window (create slot + early_slots) land first
+    panel_refresh_s: float = 10.0
+    max_top10_pct: float = 0.50
+    max_dev_pct: float = 0.20
+    max_snipers_pct: float = 0.30
+    max_insiders_pct: float = 0.30
+    max_bundlers_pct: float = 0.50  # you are copying the bundle, so this is looser than on Axiom
     # exits
     exit_on_cluster_sell_pct: float = 0.10  # bundle sells 10% of its bag after our entry -> exit
+    exit_on_linked_drop_pct: float = 0.25  # dev+bundlers+insiders hold 25% less than at entry -> exit
     take_profit_pct: float = 1.0  # +100%
     stop_loss_pct: float = 0.30  # -30%
     trailing_stop_pct: float = 0.0  # 0 = off

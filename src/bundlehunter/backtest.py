@@ -11,7 +11,7 @@ path is just the bundle/sniper buys plus the bundle wallets' later sells.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .clusters import build_clusters
 from .config import Config
@@ -46,7 +46,8 @@ def run_backtest(store: Store, cfg: Config, split: float = 0.7) -> BacktestResul
 
     index = build_clusters(store, cfg.clusters, mints=[t["mint"] for t in train])
     black = {c.cluster_id for c in index.black(cfg.selection)}
-    strat = Strategy(cfg.strategy, index.wallet_to_cluster, black)
+    # The live holder panel needs balances at each moment, which stored data cannot give: off here.
+    strat = Strategy(replace(cfg.strategy, require_holder_panel=False), index.wallet_to_cluster, black)
     broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol)
     supply = {t["mint"]: t.get("supply") for t in test}
 

@@ -7,11 +7,14 @@ max_concurrency = 8
 requests_per_second = 8.0
 
 [analyzer]
-early_slots = 3            # create slot = "bundle", next 3 slots = "snipers"
+early_slots = 3            # launch window = create slot + 3 slots
+bundle_min_wallets_per_slot = 3   # early slot with >= 3 buyers is a bundle too (0 = create slot only)
 max_mint_sig_pages = 10
 max_wallet_sig_pages = 2
 max_wallet_txs = 150
 min_funding_sol = 0.05     # smaller deposits are dust / address poisoning
+quick_funder_sigs = 100    # funder-only lookups (insiders check) skip wallets with longer histories
+max_quick_funders = 40
 min_create_slot_txs = 3    # auto mode: skip launches with fewer txs in the create slot
 min_total_txs = 150        # ...or with too little activity
 min_age_s = 1800           # analyze a launch 30 min after creation
@@ -41,7 +44,17 @@ rebound_pct = 0.05
 max_entry_vs_bundle = 4.0
 abort_if_cluster_sold_pct = 0.15
 max_cluster_supply_pct = 0.6
+# Axiom-style holder panel, % of supply held now (1.0 = off)
+require_holder_panel = true
+panel_delay_s = 3.0
+panel_refresh_s = 10.0
+max_top10_pct = 0.50
+max_dev_pct = 0.20
+max_snipers_pct = 0.30
+max_insiders_pct = 0.30
+max_bundlers_pct = 0.50
 exit_on_cluster_sell_pct = 0.10
+exit_on_linked_drop_pct = 0.25   # dev+bundlers+insiders hold 25% less than at entry -> exit
 take_profit_pct = 1.0
 stop_loss_pct = 0.30
 trailing_stop_pct = 0.0

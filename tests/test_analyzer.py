@@ -84,3 +84,19 @@ def test_process_pending_skips_unbundled_launches():
     an.cfg.min_total_txs = 5
     asyncio.run(an.process_pending(10))
     assert store.token(MINT)["status"] == "ok"
+
+
+def test_same_slot_group_after_create_counts_as_bundle_and_quick_funder():
+    rpc = _world()
+    for i in range(3):
+        rpc.txs[f"grp{i}"] = pump_buy_tx(f"grp{i}", 102, f"G{i}", MINT, 0.3, 5_000_000)
+    rpc.sigs[MINT] = [_sig(f"grp{i}", 102) for i in range(3)] + rpc.sigs[MINT]
+    store = Store(":memory:")
+    an = Analyzer(rpc, store, AnalyzerConfig(early_slots=3, bundle_min_wallets_per_slot=3))
+    r = asyncio.run(an.analyze_launch(MINT, profile=False, final=False))
+    assert sorted(r.bundle_wallets) == ["B1", "B2", "G0", "G1", "G2"] and r.sniper_wallets == ["Sniper"]
+    assert store.token(MINT)["status"] == "pending"  # final=False leaves it for the full pipeline
+    assert asyncio.run(an.quick_funders(["Dev", "B2"])) == {"Dev": "Mother"}
+    assert store.wallet("Dev")["full_profile"] == 0
+    asyncio.run(an.analyze_launch(MINT))  # full analysis still profiles the dev afterwards
+    assert store.wallet("Dev")["full_profile"] == 1

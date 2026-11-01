@@ -8,8 +8,11 @@ when they start to leave. So:
   * "dip" mode waits for a pullback from the local high plus a small bounce and
     refuses to pay more than N x the bundle's own average entry (no buying highs);
   * "snipe" mode buys immediately (fastest, but you pay up and eat the most risk);
-  * anything that looks like a rug or a dump in progress cancels the watch;
-  * once in, we exit as soon as the cluster sells a slice of its bag, or on
+  * anything that looks like a rug or a dump in progress cancels the watch, and an
+    Axiom-style holder panel (top 10 / dev / snipers / insiders / bundlers % held now)
+    blocks entries while any of them is above its limit;
+  * once in, we exit as soon as the cluster sells a slice of its bag, or when
+    dev + bundlers + insiders together hold clearly less than at our entry, or on
     take-profit / stop-loss / trailing stop / max hold time.
 
 The class is synchronous and side-effect free: it returns `Action`s and is told
@@ -53,6 +56,7 @@ class Position:
     cluster_sold_at_entry: float
     reason_open: str
     position_id: int | None = None
+    linked_at_entry: float | None = None  # dev+bundlers+insiders % of supply when we bought
     closing: bool = False
 
 
@@ -72,6 +76,8 @@ class Watch:
     check_ok: bool | None = None
     check_reason: str = ""
     supply: float | None = None
+    metrics: dict[str, float | None] | None = None  # holder panel: top10_pct, dev_pct, ...
+    block_reason: str = ""
     pending: bool = False
     done_reason: str = ""
 
@@ -123,10 +129,35 @@ class Strategy:
         out, self._finished = self._finished, []
         return out
 
-    def set_check(self, mint: str, ok: bool, reason: str = "", supply: float | None = None) -> None:
+    def set_check(
+        self, mint: str, ok: bool, reason: str = "", supply: float | None = None,
+        metrics: dict[str, float | None] | None = None,
+    ) -> None:
         w = self.watches.get(mint)
         if w:
             w.check_ok, w.check_reason, w.supply = ok, reason, supply
+            if metrics is not None:
+                w.metrics = metrics
+
+    def update_metrics(self, mint: str, metrics: dict[str, float | None]) -> None:
+        w = self.watches.get(mint)
+        if w:
+            w.metrics = metrics
+
+    def panel_block(self, m: dict[str, float | None]) -> str:
+        cfg = self.cfg
+        limits = (
+            ("top10_pct", cfg.max_top10_pct, "top 10"),
+            ("dev_pct", cfg.max_dev_pct, "dev"),
+            ("snipers_pct", cfg.max_snipers_pct, "snipers"),
+            ("insiders_pct", cfg.max_insiders_pct, "insiders"),
+            ("bundlers_pct", cfg.max_bundlers_pct, "bundlers"),
+        )
+        for key, limit, label in limits:
+            value = m.get(key)
+            if value is not None and limit < 1.0 and value > limit:
+                return f"{label} hold {value:.0%} > {limit:.0%}"
+        return ""
 
     def today_pnl(self, ts: float) -> float:
         return self.realized_by_day[_day(ts)]
@@ -192,6 +223,12 @@ class Strategy:
                 return self._finish(w, f"token check failed: {w.check_reason}")
         if w.supply and w.cluster_bought / w.supply > cfg.max_cluster_supply_pct:
             return self._finish(w, f"bundle holds {w.cluster_bought / w.supply:.0%} of supply")
+        if cfg.require_holder_panel:
+            if w.metrics is None:
+                return []
+            w.block_reason = self.panel_block(w.metrics)
+            if w.block_reason:
+                return []  # may clear as holders spread out; the entry window bounds the wait
         if len(self.positions) >= cfg.max_open_positions or w.last_price <= 0:
             return []
         if self.today_pnl(now) <= -cfg.daily_loss_limit_sol:
@@ -218,9 +255,13 @@ class Strategy:
         cfg, p = self.cfg, w.last_price
         pos.high = max(pos.high, p)
         sold_since = (w.cluster_sold - pos.cluster_sold_at_entry) / w.cluster_bought if w.cluster_bought else 0.0
+        linked_now = (w.metrics or {}).get("linked_pct")
+        linked_drop = 1 - linked_now / pos.linked_at_entry if pos.linked_at_entry and linked_now is not None else 0.0
         reason = None
         if sold_since >= cfg.exit_on_cluster_sell_pct:
             reason = f"bundle selling ({sold_since:.0%} of its bag since entry)"
+        elif cfg.exit_on_linked_drop_pct and linked_drop >= cfg.exit_on_linked_drop_pct:
+            reason = f"insiders/bundlers dumping (holdings -{linked_drop:.0%} since entry)"
         elif p >= pos.entry_price * (1 + cfg.take_profit_pct):
             reason = "take profit"
         elif p <= pos.entry_price * (1 - cfg.stop_loss_pct):
@@ -249,7 +290,10 @@ class Strategy:
     ) -> Position:
         w = self.watches[mint]
         w.pending = False
-        pos = Position(mint, w.cluster_id, price, ts, sol_spent, tokens, price, w.cluster_sold, reason, position_id)
+        pos = Position(
+            mint, w.cluster_id, price, ts, sol_spent, tokens, price, w.cluster_sold, reason, position_id,
+            linked_at_entry=(w.metrics or {}).get("linked_pct"),
+        )
         self.positions[mint] = pos
         return pos
 

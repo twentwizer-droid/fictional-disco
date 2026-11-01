@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 from .config import AnalyzerConfig
@@ -80,7 +81,11 @@ class Analyzer:
         bundle = sum(1 for s in sigs if create_slot is not None and s["slot"] == create_slot and not s.get("err"))
         return ScanResult(mint, create_slot, bundle, len(sigs), complete)
 
-    async def analyze_launch(self, mint: str, profile: bool = True, full: bool = False) -> LaunchReport:
+    async def analyze_launch(
+        self, mint: str, profile: bool = True, full: bool = False, final: bool = True
+    ) -> LaunchReport:
+        """final=False (live holder panel) stores roles but leaves the launch 'pending' for the
+        auto pipeline to analyze again later, with wallet profiles and the bundle's sells."""
         sigs, complete = await self.rpc.signatures(mint, max_pages=self.cfg.max_mint_sig_pages)
         if not sigs:
             self.store.upsert_token(mint, status="error", note="no signatures", analyzed_at=time.time())
@@ -105,15 +110,23 @@ class Analyzer:
         self.store.add_parsed(txs)
 
         creator = create_tx.fee_payer
+        window = [p for p in txs if p.slot <= s0 + self.cfg.early_slots]  # only the launch window decides roles
+        buyers_per_slot: dict[int, set[str]] = defaultdict(set)
+        for ptx in window:
+            for t in ptx.trades:
+                if t.mint == mint and t.side == "buy" and t.wallet != creator:
+                    buyers_per_slot[ptx.slot].add(t.wallet)
+        # bundle = the create slot, plus any early slot where many wallets bought at once
+        n = self.cfg.bundle_min_wallets_per_slot
+        bundle_slots = {s0} | {slot for slot, ws in buyers_per_slot.items() if n and len(ws) >= n}
+
         roles: dict[str, tuple[str, int, bool]] = {creator: ("creator", s0, create_tx.tips_lamports > 0)}
         bundle_sol = bundle_tokens = 0.0
-        for ptx in sorted(txs, key=lambda p: p.slot):
-            if ptx.slot > s0 + self.cfg.early_slots:
-                continue  # only the launch window decides roles (matters with full=True)
+        for ptx in sorted(window, key=lambda p: p.slot):
             for t in ptx.trades:
                 if t.mint != mint or t.side != "buy":
                     continue
-                in_bundle = ptx.slot == s0
+                in_bundle = ptx.slot in bundle_slots
                 if in_bundle:
                     bundle_sol += t.sol_amount
                     bundle_tokens += t.token_amount
@@ -156,11 +169,43 @@ class Analyzer:
         if profile:
             to_profile = [creator, *bundle, *(snipers if self.cfg.profile_snipers else [])]
             for wallet in to_profile:
-                if not self.store.wallet(wallet):
+                rec = self.store.wallet(wallet)
+                if not (rec and rec["full_profile"]):
                     await self.profile_wallet(wallet)
 
-        self.store.upsert_token(mint, status=report.status, analyzed_at=time.time())
+        if final:
+            self.store.upsert_token(mint, status=report.status, analyzed_at=time.time())
         return report
+
+    def _find_funder(self, wallet: str, txs: list[ParsedTx]) -> tuple[str, int, int | None, float] | None:
+        min_lamports = int(self.cfg.min_funding_sol * LAMPORTS_PER_SOL)
+        for ptx in sorted(txs, key=lambda p: p.slot):
+            for t in ptx.sol_transfers:
+                if t.dst == wallet and t.src != wallet and t.lamports >= min_lamports:
+                    return t.src, ptx.slot, ptx.block_time, t.lamports / LAMPORTS_PER_SOL
+        return None
+
+    async def quick_funder(self, wallet: str) -> str | None:
+        """Funder only (1-2 RPC calls): enough to tell if an early buyer is linked to the dev."""
+        rec = self.store.wallet(wallet)
+        if rec:
+            return rec["funder"]
+        sigs, complete = await self.rpc.signatures(wallet, max_pages=1, page_size=self.cfg.quick_funder_sigs)
+        hit = None
+        if complete:
+            oldest = [s["signature"] for s in reversed(sigs) if not s.get("err")][:3]
+            hit = self._find_funder(wallet, await self.fetch_parsed(oldest))
+        funder, slot, when, sol = hit or (None, None, None, None)
+        self.store.set_wallet(
+            wallet, funder=funder, funded_slot=slot, funded_time=when, funded_sol=sol,
+            history_complete=int(complete), tx_count=len(sigs), full_profile=0,
+        )
+        return funder
+
+    async def quick_funders(self, wallets: list[str]) -> dict[str, str]:
+        wallets = list(dict.fromkeys(wallets))[: self.cfg.max_quick_funders]
+        found = await asyncio.gather(*(self.quick_funder(w) for w in wallets), return_exceptions=True)
+        return {w: f for w, f in zip(wallets, found, strict=False) if isinstance(f, str)}
 
     async def profile_wallet(self, wallet: str) -> dict[str, object]:
         """Store a wallet's recent trades and find its funder (first meaningful SOL deposit)."""
@@ -172,18 +217,8 @@ class Analyzer:
         txs = await self.fetch_parsed(wanted)
         self.store.add_parsed(txs)
 
-        funder = funded_slot = funded_time = funded_sol = None
-        if complete:
-            min_lamports = int(self.cfg.min_funding_sol * LAMPORTS_PER_SOL)
-            for ptx in sorted(txs, key=lambda p: p.slot):
-                hit = next(
-                    (t for t in ptx.sol_transfers if t.dst == wallet and t.src != wallet and t.lamports >= min_lamports),
-                    None,
-                )
-                if hit:
-                    funder, funded_slot, funded_time = hit.src, ptx.slot, ptx.block_time
-                    funded_sol = hit.lamports / LAMPORTS_PER_SOL
-                    break
+        hit = self._find_funder(wallet, txs) if complete else None
+        funder, funded_slot, funded_time, funded_sol = hit or (None, None, None, None)
         self.store.set_wallet(
             wallet,
             funder=funder,
@@ -192,6 +227,7 @@ class Analyzer:
             funded_sol=funded_sol,
             history_complete=int(complete),
             tx_count=len(sigs),
+            full_profile=1,
         )
         mints = sorted({t.mint for p in txs for t in p.trades if t.wallet == wallet})
         return {"wallet": wallet, "funder": funder, "txs": len(sigs), "complete": complete, "mints": mints}

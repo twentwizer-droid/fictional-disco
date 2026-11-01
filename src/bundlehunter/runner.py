@@ -23,6 +23,7 @@ from .config import Config
 from .constants import LAMPORTS_PER_SOL
 from .execution import Broker
 from .feeds import PumpPortalFeed
+from .holders import HolderScanner, TokenPanel, format_panel
 from .models import MarketEvent
 from .parser import parse_transaction
 from .rpc import SolanaRpc
@@ -41,10 +42,14 @@ class BotRunner:
         broker: Broker,
         feed: PumpPortalFeed,
         analyzer: Analyzer | None = None,
+        scanner: HolderScanner | None = None,
     ) -> None:
         self.cfg, self.store, self.rpc, self.broker, self.feed, self.analyzer = (
             cfg, store, trade_rpc, broker, feed, analyzer,
         )
+        if cfg.strategy.require_holder_panel and scanner is None:
+            raise ValueError("strategy.require_holder_panel needs a HolderScanner")
+        self.scanner = scanner
         self.strategy = Strategy(cfg.strategy, {}, set())
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
@@ -126,23 +131,53 @@ class BotRunner:
     # -- checks ----------------------------------------------------------------
 
     async def _check_token(self, mint: str) -> None:
-        """Mint and freeze authority must be revoked (no infinite mint, no frozen sells)."""
+        """Mint + freeze authority must be revoked, then the Axiom-style holder panel."""
+        acct = None
         for _ in range(5):
             try:
                 acct = await self.rpc.get_parsed_account(mint)
             except Exception as exc:
                 log.debug("check %s: %s", mint, exc)
-                acct = None
             if acct:
-                info = acct["data"]["parsed"]["info"]
-                mint_auth, freeze = info.get("mintAuthority"), info.get("freezeAuthority")
-                supply = int(info["supply"]) / 10 ** int(info["decimals"])
-                ok = mint_auth is None and freeze is None
-                reason = "" if ok else f"mintAuthority={mint_auth} freezeAuthority={freeze}"
-                self.strategy.set_check(mint, ok, reason, supply)
-                return
+                break
             await asyncio.sleep(0.5)
-        self.strategy.set_check(mint, False, "mint account not found")
+        if not acct:
+            self.strategy.set_check(mint, False, "mint account not found")
+            return
+        info = acct["data"]["parsed"]["info"]
+        mint_auth, freeze = info.get("mintAuthority"), info.get("freezeAuthority")
+        supply = int(info["supply"]) / 10 ** int(info["decimals"])
+        if mint_auth is not None or freeze is not None:
+            self.strategy.set_check(mint, False, f"mintAuthority={mint_auth} freezeAuthority={freeze}", supply)
+            return
+        if not self.scanner or not self.cfg.strategy.require_holder_panel:
+            self.strategy.set_check(mint, True, "", supply)
+            return
+        await asyncio.sleep(self.cfg.strategy.panel_delay_s)
+        try:
+            panel = await self.scanner.panel(
+                mint, self.strategy.wallet_to_cluster, live=True, profile=False, final=False,
+                token_program=acct.get("owner"), supply=supply,
+            )
+        except Exception as exc:
+            self.strategy.set_check(mint, False, f"holder panel failed: {exc}", supply)
+            return
+        log.info("panel %s", format_panel(panel, compact=True))
+        self.strategy.set_check(mint, True, "", supply, panel.metrics())
+        self._spawn(self._refresh_panel(mint, panel))
+
+    async def _refresh_panel(self, mint: str, panel: TokenPanel) -> None:
+        assert self.scanner is not None
+        while mint in self.strategy.watches:
+            await asyncio.sleep(self.cfg.strategy.panel_refresh_s)
+            if mint not in self.strategy.watches:
+                return
+            try:
+                panel = await self.scanner.refresh(panel)
+                self.strategy.update_metrics(mint, panel.metrics())
+                log.debug("panel %s", format_panel(panel, compact=True))
+            except Exception as exc:
+                log.debug("panel refresh %s: %s", mint, exc)
 
     async def _funder_lookup(self, ev: MarketEvent) -> None:
         """A fresh dev wallet funded by a tracked bundler wallet = that bundler is launching."""
