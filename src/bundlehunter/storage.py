@@ -198,6 +198,15 @@ class Store:
         q = f"SELECT * FROM tokens WHERE {column} = ? AND mint != ? ORDER BY create_time"
         return [dict(r) for r in self.db.execute(q, (value, exclude_mint))]
 
+    def search_tokens(self, terms: Sequence[str], limit: int = 200) -> list[dict[str, Any]]:
+        """Tokens whose name / ticker / description contain every term (case-insensitive)."""
+        if not terms:
+            return []
+        text = "LOWER(COALESCE(name, '') || ' ' || COALESCE(symbol, '') || ' ' || COALESCE(description, ''))"
+        where = " AND ".join(f"{text} LIKE ?" for _ in terms)
+        q = f"SELECT * FROM tokens WHERE {where} ORDER BY create_time LIMIT ?"
+        return [dict(r) for r in self.db.execute(q, (*[f"%{t.lower()}%" for t in terms], limit))]
+
     def pending_tokens(self, min_age_s: float, limit: int) -> list[str]:
         cutoff = time.time() - min_age_s
         rows = self.db.execute(

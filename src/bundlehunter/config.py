@@ -142,6 +142,16 @@ class LarpConfig:
 
 
 @dataclass
+class NarrativeConfig:
+    """`bh narrative`: every token riding one narrative, each with LARP + bundle analysis."""
+
+    dexscreener: bool = True  # also search DexScreener (free public API), not only your recorded launches
+    dexscreener_url: str = "https://api.dexscreener.com/latest/dex/search"
+    max_analyze: int = 10  # tokens analyzed in depth per query (RPC cost)
+    watch_delay_s: float = 20.0  # --watch: wait for the bundle and metadata to land before analyzing
+
+
+@dataclass
 class AutoConfig:
     analyze_every_s: float = 300.0
     analyze_batch: int = 20
@@ -159,6 +169,7 @@ class Config:
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     feed: FeedConfig = field(default_factory=FeedConfig)
     larp: LarpConfig = field(default_factory=LarpConfig)
+    narrative: NarrativeConfig = field(default_factory=NarrativeConfig)
     auto: AutoConfig = field(default_factory=AutoConfig)
 
 

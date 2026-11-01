@@ -29,6 +29,10 @@ LarpCheck): is the token's story real or borrowed? It looks at copied socials, a
 account, a real project's website, "official" claims, copycat tickers, fresh-wallet holders
 and the dev's history, with an optional Claude verdict on top.
 
+**Narrative + bundle analysis** (`bh narrative "<narrative>"`) puts both together. It finds
+every token riding one narrative and tells the original from the copies and LARPs. For each
+one it shows who bundled it and how much they still hold, then picks the token worth looking at.
+
 It also builds an **Axiom-style holder panel** (`bh token <MINT>`):
 **Top 10 H., Dev H., Snipers H., Insiders, Bundlers**. These are used as entry filters, and
 as an exit signal when insiders and bundlers unload.
@@ -66,7 +70,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 46 offline tests
+pytest                      # 51 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -195,7 +199,55 @@ not as instructions. The AI only judges the facts it is given; it does not brows
 Website and metadata URLs come from the launcher, so they are fetched only over http(s),
 only from public addresses (never localhost or your LAN), with a size limit.
 
-### 5. Backtest (walk-forward)
+### 5. Narrative + bundle analysis
+
+```bash
+bh narrative "trump cat"                    # words: name / ticker / description
+bh narrative https://x.com/user/status/123  # every token that links this tweet (or account)
+bh narrative https://catcoin.xyz            # every token that links this site
+bh narrative <MINT>                         # this token's narrative: same ticker + same links
+bh narrative "trump cat" --watch            # live: report each new launch that joins it
+bh narrative "trump cat" --json
+```
+
+Example output (illustrative numbers):
+
+```
+NARRATIVE "cat": 9 token(s) found (db, dexscreener), 9 analyzed
+
+ #  token      mint              created    mcap LARP  narrative         bundle now/launch insiders  dev group                  bundle
+ 1  CAT        7xKp…pump         2 h ago   $1.2M   10  ORIGINAL            12%/40%        5%  C-MotherX (black) +18.0    PROFITABLE BUNDLER
+ 2  CAT        9aQe…pump         1 h ago    $40k   45  COPY                45%/60%       25%  -                          HEAVY BUNDLE
+ 3  OCAT       4mZt…pump        30 min ago  $8k   75  LARP                 5%/10%        2%  -                          MODERATE
+ ...
+PICK: CAT (7xKp…pump): original token of this narrative, LARP score 10; bundled by C-MotherX, a group in the black
+      (+18.0 SOL over 7 launches, 85% wins): the copy-trade target, exit when they sell
+AVOID: 2 copies / LARPs: CAT 9aQe…pump, OCAT 4mZt…pump
+```
+
+How it works:
+1. **Find the family.** Tokens come from your recorded launches (`bh run` stores every
+   pump.fun launch and its socials) plus a DexScreener search (free API, Solana only,
+   `--no-dex` to skip).
+2. **Choose what to analyze.** The first 3 launches (who started the narrative) plus the
+   biggest by market cap, up to `--limit` (default 10, each costs RPC calls).
+3. **Narrative label for each token:**
+   - **ORIGINAL**: first launch with a clean LARP check;
+   - **COPY**: later, with the same ticker or copied socials;
+   - **LARP**: LARP score 60 or more;
+   - **SIDE TOKEN**: same narrative, not copied.
+4. **Bundle label for each token:**
+   - **PROFITABLE BUNDLER**: the dev or a bundle wallet belongs to a cluster in the black, so the bot would copy it;
+   - **HEAVY BUNDLE**: bundlers hold 30% or more, or insiders 20% or more;
+   - **BUNDLE SOLD**: the bundle sold over 70% of its bag;
+   - **CLEAN** or **MODERATE**.
+5. **Pick.** The original (or a side token) that passes `max_larp_score`. It prefers one
+   bundled by a cluster in the black, then the largest market cap.
+
+The DexScreener "created" time is the pair's creation time. For a token that has moved to
+an AMM it can be later than the real launch, so analyzed tokens use the on-chain create time.
+
+### 6. Backtest (walk-forward)
 
 ```bash
 bh backtest --split 0.7 [--mode dip|snipe]
@@ -205,7 +257,7 @@ Clusters are scored on the oldest 70% of launches only, then the strategy is
 replayed on the newest 30%, so no cluster is picked using the launches it is tested
 on. Use `analyze --full` so the replay has the whole early price path.
 
-### 6. Paper trade, then go live with small size
+### 7. Paper trade, then go live with small size
 
 ```bash
 bh run                         # paper: records launches, analyzes, rebuilds clusters, trades on paper
@@ -289,6 +341,7 @@ All parameters are in `config.example.toml`.
 | `analyzer.py` | launch analysis (create slot, bundle, snipers), wallet profiling + funder, seeding, auto pipeline with a cheap 1-call prefilter |
 | `holders.py` | Axiom-style holder panel: group classification, live balances via associated token accounts, top 10 without pools |
 | `larp.py` | LARP check: metadata (Metaplex / Token-2022), socials, copycats, website + domain age, optional X and Claude verdict |
+| `narrative.py` | narrative + bundle analysis: find every token of a narrative (DB + DexScreener), label original / copy / LARP and the bundle state, pick, live watch |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |
 | `execution.py` | `PaperBroker`, `LiveBroker` (PumpPortal tx + local signing + Jito bundle + RPC fallback) |

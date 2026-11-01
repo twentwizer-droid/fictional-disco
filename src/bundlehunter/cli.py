@@ -19,6 +19,7 @@ from .feeds import PumpPortalFeed
 from .clusters import ClusterIndex
 from .holders import LABELS, HolderScanner, TokenPanel, format_panel
 from .larp import LarpChecker, format_report
+from .narrative import HEADER, NarrativeAnalyzer, family_to_dict, format_family, member_line, parse_query
 from .rpc import SolanaRpc
 from .runner import BotRunner
 from .storage import Store
@@ -185,6 +186,43 @@ async def cmd_check(cfg: Config, store: Store, args: argparse.Namespace) -> None
     print(format_report(report))
 
 
+async def cmd_narrative(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Narrative + bundle analysis: every token riding a narrative, original vs copies, bundle state."""
+    q = parse_query(args.query)
+    if not (q.terms or q.twitter or q.website or q.seed_mint):
+        sys.exit("give a narrative: words, an X / website link, or a token address")
+    live = not args.db_only
+    rpc = _rpc(cfg)
+    an = Analyzer(rpc, store, cfg.analyzer)
+    larp = LarpChecker(rpc if live else None, store, cfg.larp, an)
+    na = NarrativeAnalyzer(cfg, store, larp, HolderScanner(rpc, store, an, cfg.clusters))
+    try:
+        if args.watch:
+            print(f'watching new pump.fun launches for "{q.label}" (Ctrl+C to stop)\n{HEADER}')
+
+            def show(m, family_size: int) -> None:
+                target = "  <-- COPY-TRADE TARGET" if m.cluster_black and m.narrative_label not in ("LARP", "COPY") else ""
+                print(member_line(family_size, m) + target, flush=True)
+
+            await na.watch(q, PumpPortalFeed(cfg.feed.pumpportal_ws), show)
+            return
+        members = await na.find(q, use_dex=live and not args.no_dex, live=live)
+        if not members:
+            print(f'no tokens found for "{q.label}". Run `bh run` for a while to record launches, '
+                  "or drop --no-dex / --db-only to search DexScreener too.")
+            return
+        await na.analyze(members, args.limit, live=live)
+        pick = na.pick(members)
+    finally:
+        await na.close()
+        await larp.close()
+        await rpc.close()
+    if args.json:
+        print(json.dumps(family_to_dict(q, members, pick), indent=2, default=str))
+    else:
+        print(format_family(q, members, pick))
+
+
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     index = build_clusters(store, cfg.clusters)
     clusters = list(index.clusters.values())
@@ -331,6 +369,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-panel", action="store_true", help="skip the holder panel (no launch analysis)")
     s.add_argument("--db-only", action="store_true", help="no network: only what is stored")
 
+    s = sub.add_parser("narrative", help="narrative + bundle analysis: all tokens of a narrative, original vs copies")
+    s.add_argument("query", help='words ("trump cat"), an X / website link, or a token address')
+    s.add_argument("--limit", type=int, default=None, help="tokens to analyze in depth (default [narrative] max_analyze)")
+    s.add_argument("--watch", action="store_true", help="stay live and report every new launch that joins the narrative")
+    s.add_argument("--no-dex", action="store_true", help="only your recorded launches, no DexScreener search")
+    s.add_argument("--db-only", action="store_true", help="no network at all")
+    s.add_argument("--json", action="store_true")
+
     s = sub.add_parser("clusters", help="rank bundler clusters by realized PnL")
     s.add_argument("--top", type=int, default=30)
     s.add_argument("--all", action="store_true", help="include single-launch clusters")
@@ -367,6 +413,7 @@ def main(argv: list[str] | None = None) -> None:
         "scan": cmd_scan,
         "token": cmd_token,
         "check": cmd_check,
+        "narrative": cmd_narrative,
         "clusters": cmd_clusters,
         "cluster": cmd_cluster,
         "backtest": cmd_backtest,
