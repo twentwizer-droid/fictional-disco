@@ -53,6 +53,8 @@ max_dev_pct = 0.20
 max_snipers_pct = 0.30
 max_insiders_pct = 0.30
 max_bundlers_pct = 0.50
+require_larp_check = true   # narrative / socials / copycat check, runs next to the panel
+max_larp_score = 60
 exit_on_cluster_sell_pct = 0.10
 exit_on_linked_drop_pct = 0.25   # dev+bundlers+insiders hold 25% less than at entry -> exit
 take_profit_pct = 1.0
@@ -72,6 +74,17 @@ paper_slippage_pct = 3.0
 [feed]
 record_launches = true
 funder_lookup_on_create = false
+fetch_metadata = true       # store every launch's socials so copies can be spotted later
+
+[larp]
+ipfs_gateway = "https://ipfs.io/ipfs/"
+fetch_website = true
+rdap = true                # domain age
+fresh_max_txs = 10
+famous_handles = ["elonmusk", "realdonaldtrump", "potus", "cz_binance", "binance", "coinbase", "solana",
+                  "aeyakovenko", "vitalikbuterin", "saylor", "kanyewest", "openai", "nasa", "spacex", "tesla"]
+ai_model = "claude-opus-5-5"   # `bh check --ai`, needs ANTHROPIC_API_KEY and pip install ".[ai]"
+ai_effort = "medium"
 
 [auto]
 analyze_every_s = 300

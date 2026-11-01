@@ -24,7 +24,12 @@ It answers three questions for every bundler cluster:
 
 …and how much they made: realized PnL in SOL (fees and Jito tips included), win rate, open bags.
 
-For every token it also builds an **Axiom-style holder panel** (`bh token <MINT>`):
+For every token there is also a **LARP check** (`bh check <MINT>`, in the spirit of
+LarpCheck): is the token's story real or borrowed? It looks at copied socials, a famous
+account, a real project's website, "official" claims, copycat tickers, fresh-wallet holders
+and the dev's history, with an optional Claude verdict on top.
+
+It also builds an **Axiom-style holder panel** (`bh token <MINT>`):
 **Top 10 H., Dev H., Snipers H., Insiders, Bundlers**. These are used as entry filters, and
 as an exit signal when insiders and bundlers unload.
 
@@ -61,7 +66,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 37 offline tests
+pytest                      # 46 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -146,7 +151,51 @@ These are our own definitions. Axiom does not publish its formulas, so numbers c
 the launch window; for insiders it also includes tokens handed to them. Rows can overlap:
 a bundle wallet funded by the dev is a bundler **and** an insider.
 
-### 4. Backtest (walk-forward)
+### 4. LARP check: is the narrative real?
+
+```bash
+bh check <MINT>              # holder panel + LARP findings + 0-100 risk score
+bh check <MINT> --ai         # + a Claude verdict on the narrative (ANTHROPIC_API_KEY, pip install ".[ai]")
+bh check <MINT> --json
+bh check <MINT> --db-only    # no network, only stored data
+```
+
+```
+LARP CHECK  PEPE  Pepe  NewMintPEPE
+risk score 80/100: HIGH RISK (likely LARP / rug setup)
+  X: x.com/realpepe
+
+  RED     same X link as earlier token OldPepeMint (24 h ago): copied socials (classic LARP)
+  RED     dev group usually exits within 2 min of launch
+  YELLOW  description claims 'official': unverified affiliation claim
+  YELLOW  1 earlier token(s) used the name/ticker 'PEPE'; the first was OldPepeMint (24 h ago): this one is a copy
+  YELLOW  insiders hold 10.0% of supply
+  info    check that @realpepe itself posted this contract address
+  info    dev group is profitable (+13.5 SOL, 100% wins): that money comes from buyers
+```
+
+| area | what is checked |
+|---|---|
+| contract | mint / freeze authority, mutable metadata (name and socials can be swapped later) |
+| socials | no socials at all, links to a famous account (`[larp] famous_handles`), a tweet used as the narrative, a "website" that is only a social link, "official / endorsed / CEO" claims |
+| copycats | earlier tokens with the same ticker or name, the same X / Telegram / website / image, or the identical metadata file. Same tweet = "crowded narrative" (yellow), same profile/site = copied socials (red) |
+| website | shows **this** CA (green), **another** token's CA (red), or none (yellow); domain age via RDAP. An old, established domain that never mentions the token = borrowed website (red) |
+| X (optional) | did the linked account post this CA in the last 7 days. Needs `BH_X_BEARER_TOKEN` (paid X API) |
+| holders | the panel above: bundlers / insiders / snipers / top 10 thresholds, fresh wallets in the top 10, insiders already out |
+| dev | the dev group: serial launcher, usual time to exit, how much they made |
+
+Score: red +25, yellow +10, green −10, capped 0–100. 60+ = high risk, 30+ = suspicious.
+Copycat detection compares against launches in your DB: `bh run` records every launch and
+(`feed.fetch_metadata = true`) its socials, so it gets better the longer it runs.
+
+`--ai` sends the collected facts to Claude (`claude-opus-5-5`, JSON verdict: risk,
+summary, reasons, unverified claims). The token's own texts are passed as data to evaluate,
+not as instructions. The AI only judges the facts it is given; it does not browse X.
+
+Website and metadata URLs come from the launcher, so they are fetched only over http(s),
+only from public addresses (never localhost or your LAN), with a size limit.
+
+### 5. Backtest (walk-forward)
 
 ```bash
 bh backtest --split 0.7 [--mode dip|snipe]
@@ -156,7 +205,7 @@ Clusters are scored on the oldest 70% of launches only, then the strategy is
 replayed on the newest 30%, so no cluster is picked using the launches it is tested
 on. Use `analyze --full` so the replay has the whole early price path.
 
-### 5. Paper trade, then go live with small size
+### 6. Paper trade, then go live with small size
 
 ```bash
 bh run                         # paper: records launches, analyzes, rebuilds clusters, trades on paper
@@ -198,6 +247,9 @@ Watch opens when a wallet of a black cluster creates or buys a token. With
 `feed.funder_lookup_on_create = true`, a fresh dev wallet funded by a known cluster
 wallet also opens a watch (2 RPC calls per launch).
 
+The LARP check runs in parallel with the holder panel; entry is blocked while its score is
+above `max_larp_score` (60). If the check itself fails, it doesn't block.
+
 The holder panel is computed `panel_delay_s` (3 s) after the watch opens. That
 costs about `2 + launch-window txs + up to max_quick_funders × 2` RPC calls, so raise
 `requests_per_second` on a paid plan. It is refreshed every `panel_refresh_s`. While top 10,
@@ -224,8 +276,8 @@ above `max_entry_vs_bundle` × the bundle's average entry. Limits:
 5. optional trailing stop;
 6. `max_hold_s`.
 
-The backtest skips the holder panel, because stored trades can't give exact balances at
-every moment.
+The backtest skips the holder panel and the LARP check, because stored data can't give the
+state at every moment.
 
 All parameters are in `config.example.toml`.
 
@@ -236,6 +288,7 @@ All parameters are in `config.example.toml`.
 | `parser.py` | jsonParsed tx → trades / token transfers / SOL transfers / Jito tips / created mints. Works by diffing balances, not by decoding each program, so it handles pump.fun, PumpSwap, Raydium, WSOL routes and multi-signer bundle txs |
 | `analyzer.py` | launch analysis (create slot, bundle, snipers), wallet profiling + funder, seeding, auto pipeline with a cheap 1-call prefilter |
 | `holders.py` | Axiom-style holder panel: group classification, live balances via associated token accounts, top 10 without pools |
+| `larp.py` | LARP check: metadata (Metaplex / Token-2022), socials, copycats, website + domain age, optional X and Claude verdict |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |
 | `execution.py` | `PaperBroker`, `LiveBroker` (PumpPortal tx + local signing + Jito bundle + RPC fallback) |

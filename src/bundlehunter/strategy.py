@@ -142,10 +142,13 @@ class Strategy:
     def update_metrics(self, mint: str, metrics: dict[str, float | None]) -> None:
         w = self.watches.get(mint)
         if w:
-            w.metrics = metrics
+            w.metrics = {**(w.metrics or {}), **metrics}  # keep e.g. larp_score across panel refreshes
 
     def panel_block(self, m: dict[str, float | None]) -> str:
         cfg = self.cfg
+        score = m.get("larp_score")
+        if cfg.require_larp_check and score is not None and score > cfg.max_larp_score:
+            return f"LARP score {score:.0f} > {cfg.max_larp_score}"
         limits = (
             ("top10_pct", cfg.max_top10_pct, "top 10"),
             ("dev_pct", cfg.max_dev_pct, "dev"),
@@ -223,7 +226,7 @@ class Strategy:
                 return self._finish(w, f"token check failed: {w.check_reason}")
         if w.supply and w.cluster_bought / w.supply > cfg.max_cluster_supply_pct:
             return self._finish(w, f"bundle holds {w.cluster_bought / w.supply:.0%} of supply")
-        if cfg.require_holder_panel:
+        if cfg.require_holder_panel or cfg.require_larp_check:
             if w.metrics is None:
                 return []
             w.block_reason = self.panel_block(w.metrics)

@@ -24,6 +24,7 @@ from .constants import LAMPORTS_PER_SOL
 from .execution import Broker
 from .feeds import PumpPortalFeed
 from .holders import HolderScanner, TokenPanel, format_panel
+from .larp import LarpChecker
 from .models import MarketEvent
 from .parser import parse_transaction
 from .rpc import SolanaRpc
@@ -43,6 +44,7 @@ class BotRunner:
         feed: PumpPortalFeed,
         analyzer: Analyzer | None = None,
         scanner: HolderScanner | None = None,
+        larp: LarpChecker | None = None,
     ) -> None:
         self.cfg, self.store, self.rpc, self.broker, self.feed, self.analyzer = (
             cfg, store, trade_rpc, broker, feed, analyzer,
@@ -50,6 +52,10 @@ class BotRunner:
         if cfg.strategy.require_holder_panel and scanner is None:
             raise ValueError("strategy.require_holder_panel needs a HolderScanner")
         self.scanner = scanner
+        if cfg.strategy.require_larp_check and larp is None:
+            raise ValueError("strategy.require_larp_check needs a LarpChecker")
+        self.larp = larp
+        self._meta_pending = 0
         self.strategy = Strategy(cfg.strategy, {}, set())
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
@@ -102,9 +108,22 @@ class BotRunner:
                 self._recent_creates[ev.mint] = ev
                 if len(self._recent_creates) > 5000:
                     self._recent_creates.popitem(last=False)
+                if self.cfg.feed.fetch_metadata and self.larp and ev.uri and self._meta_pending < 200:
+                    self._spawn(self._record_metadata(ev.mint, ev.uri))
                 if self.cfg.feed.funder_lookup_on_create and ev.wallet not in self.strategy.wallet_to_cluster:
                     self._spawn(self._funder_lookup(ev))
             self._handle(ev)
+
+    async def _record_metadata(self, mint: str, uri: str) -> None:
+        """Keep every launch's socials so the LARP check can spot copies of them later."""
+        assert self.larp is not None
+        self._meta_pending += 1
+        try:
+            await self.larp.store_offchain(mint, uri)
+        except Exception as exc:
+            log.debug("metadata %s: %s", mint, exc)
+        finally:
+            self._meta_pending -= 1
 
     def _handle(self, ev: MarketEvent) -> None:
         for action in self.strategy.on_event(ev):
@@ -150,21 +169,41 @@ class BotRunner:
         if mint_auth is not None or freeze is not None:
             self.strategy.set_check(mint, False, f"mintAuthority={mint_auth} freezeAuthority={freeze}", supply)
             return
-        if not self.scanner or not self.cfg.strategy.require_holder_panel:
+        use_panel = bool(self.scanner and self.cfg.strategy.require_holder_panel)
+        use_larp = bool(self.larp and self.cfg.strategy.require_larp_check)
+        if not (use_panel or use_larp):
             self.strategy.set_check(mint, True, "", supply)
             return
-        await asyncio.sleep(self.cfg.strategy.panel_delay_s)
-        try:
-            panel = await self.scanner.panel(
+
+        async def panel_job() -> TokenPanel:
+            assert self.scanner is not None
+            await asyncio.sleep(self.cfg.strategy.panel_delay_s)
+            return await self.scanner.panel(
                 mint, self.strategy.wallet_to_cluster, live=True, profile=False, final=False,
                 token_program=acct.get("owner"), supply=supply,
             )
-        except Exception as exc:
-            self.strategy.set_check(mint, False, f"holder panel failed: {exc}", supply)
+
+        # holder panel and LARP check run in parallel
+        panel_res, larp_res = await asyncio.gather(
+            panel_job() if use_panel else asyncio.sleep(0, None),
+            self.larp.check(mint, live=True) if use_larp and self.larp else asyncio.sleep(0, None),
+            return_exceptions=True,
+        )
+        if isinstance(panel_res, BaseException):
+            self.strategy.set_check(mint, False, f"holder panel failed: {panel_res}", supply)
             return
-        log.info("panel %s", format_panel(panel, compact=True))
-        self.strategy.set_check(mint, True, "", supply, panel.metrics())
-        self._spawn(self._refresh_panel(mint, panel))
+        metrics: dict[str, float | None] = panel_res.metrics() if panel_res else {}
+        if use_larp:
+            if isinstance(larp_res, BaseException):
+                log.warning("LARP check %s failed: %s", mint, larp_res)
+                metrics["larp_score"] = None  # best effort: a failed check does not block
+            elif larp_res is not None:
+                metrics["larp_score"] = larp_res.score
+                log.info("larp %s: score %d (%s)", mint, larp_res.score, larp_res.verdict)
+        if panel_res:
+            log.info("panel %s", format_panel(panel_res, compact=True))
+            self._spawn(self._refresh_panel(mint, panel_res))
+        self.strategy.set_check(mint, True, "", supply, metrics)
 
     async def _refresh_panel(self, mint: str, panel: TokenPanel) -> None:
         assert self.scanner is not None

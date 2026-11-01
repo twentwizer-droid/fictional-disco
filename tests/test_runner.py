@@ -52,6 +52,20 @@ class FakeScanner:
         return panel
 
 
+class FakeLarp:
+    def __init__(self):
+        self.checked, self.recorded = [], []
+
+    async def check(self, mint, live=True):
+        from bundlehunter.larp import Finding, LarpReport, TokenMeta
+
+        self.checked.append(mint)
+        return LarpReport(mint, TokenMeta(), [Finding("yellow", "x", "y")])
+
+    async def store_offchain(self, mint, uri):
+        self.recorded.append((mint, uri))
+
+
 class FakeRpc:
     async def get_parsed_account(self, mint):
         info = {"mintAuthority": None, "freezeAuthority": None, "supply": "1000000000000000", "decimals": 6}
@@ -67,7 +81,7 @@ def test_runner_records_watches_and_trades_end_to_end():
     for i in range(3):
         add_launch(store, f"X{i}", "dev", ["b1", "b2"], T0 - 10_000 + i * 100, i * 1000, 1.0, 3.0)
     events = [
-        ev("create", "dev", 1e-8, 0, 10_000_000),
+        MarketEvent("create", MINT, "dev", T0, 0.1, 10_000_000, 1e-8, "sig0dev", uri="https://ipfs.example/x"),
         ev("buy", "b1", 1.1e-8, 1, 10_000_000),
         ev("buy", "b1", 1.1e-8, 1, 10_000_000),  # duplicate (token + account subscription): ignored
         *[ev("buy", f"r{i}", p, 2 + i) for i, p in enumerate([1.5e-8, 2e-8, 3e-8, 2.4e-8, 2e-8, 2.12e-8])],
@@ -77,7 +91,8 @@ def test_runner_records_watches_and_trades_end_to_end():
     cfg = Config()
     cfg.strategy.panel_delay_s = 0
     scanner = FakeScanner()
-    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed, scanner=scanner)
+    larp = FakeLarp()
+    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed, scanner=scanner, larp=larp)
 
     async def go():
         await runner.rebuild()
@@ -95,6 +110,20 @@ def test_runner_records_watches_and_trades_end_to_end():
     assert pos["reason_open"].startswith("dip") and pos["reason_close"].startswith("bundle selling")
     assert pos["closed_at"] and pos["pnl_sol"] is not None
     assert runner.strategy.watches.get(MINT) is None
+    assert larp.checked == [MINT] and larp.recorded == [(MINT, "https://ipfs.example/x")]
+
+
+def test_larp_score_blocks_entry():
+    from bundlehunter.config import StrategyConfig
+    from bundlehunter.strategy import Strategy
+
+    s = Strategy(StrategyConfig(mode="snipe", max_larp_score=60), {"dev": "C1"}, {"C1"})
+    s.on_event(MarketEvent("create", MINT, "dev", 0, 0, 0, 1e-8))
+    s.set_check(MINT, True, supply=1e9, metrics={"larp_score": 75})
+    assert s.on_event(MarketEvent("buy", MINT, "r", 1, 0.1, 1e7, 1e-8)) == []
+    assert s.watches[MINT].block_reason == "LARP score 75 > 60"
+    s.update_metrics(MINT, {"bundlers_pct": 0.1})  # panel refresh keeps the larp score
+    assert s.watches[MINT].metrics["larp_score"] == 75
 
 
 def test_example_config_is_valid(monkeypatch):

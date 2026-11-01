@@ -133,11 +133,21 @@ class Store:
         self.db.executescript(SCHEMA)
         self._migrate()
 
+    _ADDED_COLUMNS = {
+        "wallets": {"full_profile": "INTEGER NOT NULL DEFAULT 1"},
+        # token metadata for the LARP check; links are stored normalized (see larp.norm_link)
+        "tokens": {c: "TEXT" for c in ("uri", "description", "image", "twitter", "telegram", "website")}
+        | {"meta_at": "REAL"},
+    }
+    _LINK_COLUMNS = ("uri", "image", "twitter", "telegram", "website")
+
     def _migrate(self) -> None:
-        cols = {r[1] for r in self.db.execute("PRAGMA table_info(wallets)")}
-        if "full_profile" not in cols:
-            self.db.execute("ALTER TABLE wallets ADD COLUMN full_profile INTEGER NOT NULL DEFAULT 1")
-            self.db.commit()
+        for table, columns in self._ADDED_COLUMNS.items():
+            have = {r[1] for r in self.db.execute(f"PRAGMA table_info({table})")}
+            for col, decl in columns.items():
+                if col not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+        self.db.commit()
 
     def close(self) -> None:
         self.db.close()
@@ -164,6 +174,29 @@ class Store:
             q = f"SELECT * FROM tokens WHERE status IN ({','.join('?' * len(st))}) ORDER BY create_time"
             rows = self.db.execute(q, st).fetchall()
         return [dict(r) for r in rows]
+
+    def similar_tokens(self, mint: str, name: str, symbol: str) -> list[dict[str, Any]]:
+        """Other tokens with the same ticker or name (case, spaces and '$' ignored)."""
+        norm = "LOWER(REPLACE(REPLACE(TRIM({c}), '$', ''), ' ', ''))"
+        conds, args = [], []
+        if symbol:
+            conds.append(f"{norm.format(c='symbol')} = ?")
+            args.append(symbol.replace("$", "").replace(" ", "").lower())
+        if name:
+            conds.append(f"{norm.format(c='name')} = ?")
+            args.append(name.replace("$", "").replace(" ", "").lower())
+        if not conds:
+            return []
+        q = f"SELECT * FROM tokens WHERE mint != ? AND ({' OR '.join(conds)}) ORDER BY create_time"
+        return [dict(r) for r in self.db.execute(q, (mint, *args))]
+
+    def tokens_with(self, column: str, value: str, exclude_mint: str) -> list[dict[str, Any]]:
+        if column not in self._LINK_COLUMNS:
+            raise ValueError(column)
+        if not value:
+            return []
+        q = f"SELECT * FROM tokens WHERE {column} = ? AND mint != ? ORDER BY create_time"
+        return [dict(r) for r in self.db.execute(q, (value, exclude_mint))]
 
     def pending_tokens(self, min_age_s: float, limit: int) -> list[str]:
         cutoff = time.time() - min_age_s

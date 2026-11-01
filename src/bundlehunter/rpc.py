@@ -108,6 +108,13 @@ class SolanaRpc:
         res = await self.call("getAccountInfo", [address, {"encoding": "jsonParsed", "commitment": "confirmed"}])
         return (res or {}).get("value")
 
+    async def get_account_bytes(self, address: str) -> bytes | None:
+        import base64
+
+        res = await self.call("getAccountInfo", [address, {"encoding": "base64", "commitment": "confirmed"}])
+        value = (res or {}).get("value")
+        return base64.b64decode(value["data"][0]) if value else None
+
     async def get_multiple_accounts(self, addresses: list[str]) -> list[dict[str, Any] | None]:
         out: list[dict[str, Any] | None] = []
         for i in range(0, len(addresses), 100):

@@ -47,6 +47,7 @@ def normalize(msg: dict[str, Any], now: float) -> MarketEvent | None:
         signature=msg.get("signature", ""),
         name=msg.get("name", "") or "",
         symbol=msg.get("symbol", "") or "",
+        uri=msg.get("uri", "") or "",
     )
 
 

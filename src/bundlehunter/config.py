@@ -87,6 +87,9 @@ class StrategyConfig:
     max_snipers_pct: float = 0.30
     max_insiders_pct: float = 0.30
     max_bundlers_pct: float = 0.50  # you are copying the bundle, so this is looser than on Axiom
+    # LARP check (narrative / socials / copycats), 0-100; runs in parallel with the holder panel
+    require_larp_check: bool = True
+    max_larp_score: int = 60
     # exits
     exit_on_cluster_sell_pct: float = 0.10  # bundle sells 10% of its bag after our entry -> exit
     exit_on_linked_drop_pct: float = 0.25  # dev+bundlers+insiders hold 25% less than at entry -> exit
@@ -116,6 +119,26 @@ class FeedConfig:
     pumpportal_ws: str = "wss://pumpportal.fun/api/data"
     record_launches: bool = True  # store every new token so the analyzer can process it later
     funder_lookup_on_create: bool = False  # 2 RPC calls per launch: catches fresh dev wallets funded by known bundlers
+    fetch_metadata: bool = True  # fetch every launch's metadata JSON so the LARP check can spot copied socials
+
+
+@dataclass
+class LarpConfig:
+    """LARP check: is the token's story (socials, site, name, holders) real or borrowed?"""
+
+    ipfs_gateway: str = "https://ipfs.io/ipfs/"
+    http_timeout_s: float = 6.0
+    fetch_website: bool = True
+    rdap: bool = True  # domain age via rdap.org
+    fresh_max_txs: int = 10  # a top holder with <= N txs in its whole history is a fresh wallet
+    famous_handles: list[str] = field(
+        default_factory=lambda: [
+            "elonmusk", "realdonaldtrump", "potus", "cz_binance", "binance", "coinbase", "solana",
+            "aeyakovenko", "vitalikbuterin", "saylor", "kanyewest", "openai", "nasa", "spacex", "tesla",
+        ]
+    )
+    ai_model: str = "claude-opus-5-5"  # optional AI verdict (`bh check --ai`, needs ANTHROPIC_API_KEY)
+    ai_effort: str = "medium"
 
 
 @dataclass
@@ -135,6 +158,7 @@ class Config:
     strategy: StrategyConfig = field(default_factory=StrategyConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     feed: FeedConfig = field(default_factory=FeedConfig)
+    larp: LarpConfig = field(default_factory=LarpConfig)
     auto: AutoConfig = field(default_factory=AutoConfig)
 
 

@@ -16,6 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+ai = ["anthropic>=2.3"]  # optional AI verdict in `bh check --ai`
 
 [project.scripts]
 bh = "bundlehunter.cli:main"

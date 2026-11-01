@@ -81,3 +81,4 @@ class MarketEvent:
     signature: str = ""
     name: str = ""
     symbol: str = ""
+    uri: str = ""  # metadata URI (creates only)

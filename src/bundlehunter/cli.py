@@ -16,7 +16,9 @@ from .clusters import build_clusters
 from .config import Config, load_config
 from .execution import LiveBroker, PaperBroker, load_keypair
 from .feeds import PumpPortalFeed
-from .holders import LABELS, HolderScanner, format_panel
+from .clusters import ClusterIndex
+from .holders import LABELS, HolderScanner, TokenPanel, format_panel
+from .larp import LarpChecker, format_report
 from .rpc import SolanaRpc
 from .runner import BotRunner
 from .storage import Store
@@ -81,21 +83,35 @@ async def cmd_scan(cfg: Config, store: Store, args: argparse.Namespace) -> None:
         await rpc.close()
 
 
+async def _load_panel(
+    cfg: Config, store: Store, rpc: SolanaRpc, an: Analyzer, args: argparse.Namespace
+) -> tuple[TokenPanel | None, ClusterIndex, str]:
+    """Analyze the launch if needed, rebuild clusters, compute the holder panel."""
+    note = ""
+    tok = store.token(args.mint)
+    if not args.db_only and (args.refresh or not tok or tok["status"] not in ("ok", "partial")):
+        report = await an.analyze_launch(args.mint, profile=not args.fast)
+        if report.status == "error":
+            note = report.note
+    index = build_clusters(store, cfg.clusters)
+    try:
+        panel = await HolderScanner(rpc, store, an, cfg.clusters).panel(
+            args.mint, index.wallet_to_cluster, live=not args.db_only, analyze=False
+        )
+    except ValueError as exc:
+        return None, index, note or str(exc)
+    return panel, index, note
+
+
 async def cmd_token(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     """Axiom-style panel: Top 10 H. / Dev H. / Snipers H. / Insiders / Bundlers."""
     rpc = _rpc(cfg)
     try:
-        an = Analyzer(rpc, store, cfg.analyzer)
-        tok = store.token(args.mint)
-        if not args.db_only and (args.refresh or not tok or tok["status"] not in ("ok", "partial")):
-            report = await an.analyze_launch(args.mint, profile=not args.fast)
-            if report.status == "error":
-                sys.exit(f"{args.mint}: {report.note}")
-        index = build_clusters(store, cfg.clusters)
-        scanner = HolderScanner(rpc, store, an, cfg.clusters)
-        panel = await scanner.panel(args.mint, index.wallet_to_cluster, live=not args.db_only, analyze=False)
+        panel, index, note = await _load_panel(cfg, store, rpc, Analyzer(rpc, store, cfg.analyzer), args)
     finally:
         await rpc.close()
+    if panel is None:
+        sys.exit(f"{args.mint}: {note}")
 
     blocked = Strategy(cfg.strategy, {}, set()).panel_block(panel.metrics())
     cluster = index.clusters.get(panel.cluster_id or "")
@@ -141,6 +157,32 @@ async def cmd_token(cfg: Config, store: Store, args: argparse.Namespace) -> None
             for owner, amount in panel.top10:
                 tags = [LABELS[g] for g in ("dev", "bundlers", "snipers", "insiders") if owner in panel.groups[g].wallets]
                 print(f"  {owner}  {panel.pct(amount):.2%}  {', '.join(tags)}")
+
+
+async def cmd_check(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """LARP check: narrative, socials, copycats, website, holders, dev history (+ optional AI verdict)."""
+    rpc = _rpc(cfg)
+    live = not args.db_only
+    an = Analyzer(rpc, store, cfg.analyzer)
+    larp = LarpChecker(rpc if live else None, store, cfg.larp, an)
+    try:
+        panel, index, note = (None, None, "") if args.no_panel else await _load_panel(cfg, store, rpc, an, args)
+        cluster = index.clusters.get(panel.cluster_id or "") if (panel and index) else None
+        report = await larp.check(args.mint, panel, cluster, live=live, ai=args.ai)
+    finally:
+        await larp.close()
+        await rpc.close()
+    if args.json:
+        out = report.to_dict()
+        out["holder_panel"] = panel.metrics() if panel else None
+        print(json.dumps(out, indent=2, default=str))
+        return
+    if panel:
+        print(format_panel(panel))
+        print()
+    elif note and not args.no_panel:
+        print(f"(no holder panel: {note})\n")
+    print(format_report(report))
 
 
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
@@ -225,12 +267,17 @@ async def cmd_run(cfg: Config, store: Store, args: argparse.Namespace) -> None:
         broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol)
         logging.info("paper trading (no real orders). Use --live to trade for real.")
     analyzer = None if args.no_analyze else Analyzer(analysis_rpc, store, cfg.analyzer)
-    # the holder panel is on the trading path, so it uses the trading RPC client
-    scanner = HolderScanner(trade_rpc, store, Analyzer(trade_rpc, store, cfg.analyzer), cfg.clusters)
-    runner = BotRunner(cfg, store, trade_rpc, broker, PumpPortalFeed(cfg.feed.pumpportal_ws), analyzer, scanner)
+    # the holder panel and LARP check are on the trading path, so they use the trading RPC client
+    trade_analyzer = Analyzer(trade_rpc, store, cfg.analyzer)
+    scanner = HolderScanner(trade_rpc, store, trade_analyzer, cfg.clusters)
+    larp = LarpChecker(trade_rpc, store, cfg.larp, trade_analyzer)
+    runner = BotRunner(
+        cfg, store, trade_rpc, broker, PumpPortalFeed(cfg.feed.pumpportal_ws), analyzer, scanner, larp
+    )
     try:
         await runner.run()
     finally:
+        await larp.close()
         await trade_rpc.close()
         await analysis_rpc.close()
 
@@ -275,6 +322,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--fast", action="store_true", help="skip full wallet profiles (funders via quick lookups only)")
     s.add_argument("--db-only", action="store_true", help="no RPC: holdings estimated from stored trades")
 
+    s = sub.add_parser("check", help="LARP check: narrative, socials, copycats, website, holders, dev history")
+    s.add_argument("mint")
+    s.add_argument("--ai", action="store_true", help="add a Claude verdict on the narrative (needs ANTHROPIC_API_KEY)")
+    s.add_argument("--json", action="store_true")
+    s.add_argument("--refresh", action="store_true", help="re-analyze the launch first")
+    s.add_argument("--fast", action="store_true", help="skip full wallet profiles")
+    s.add_argument("--no-panel", action="store_true", help="skip the holder panel (no launch analysis)")
+    s.add_argument("--db-only", action="store_true", help="no network: only what is stored")
+
     s = sub.add_parser("clusters", help="rank bundler clusters by realized PnL")
     s.add_argument("--top", type=int, default=30)
     s.add_argument("--all", action="store_true", help="include single-launch clusters")
@@ -310,6 +366,7 @@ def main(argv: list[str] | None = None) -> None:
         "seed": cmd_seed,
         "scan": cmd_scan,
         "token": cmd_token,
+        "check": cmd_check,
         "clusters": cmd_clusters,
         "cluster": cmd_cluster,
         "backtest": cmd_backtest,
