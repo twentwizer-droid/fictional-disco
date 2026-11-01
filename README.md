@@ -1,16 +1,20 @@
 # bundlehunter
 
+> **Інструкція українською для запуску без програмування: [docs/START_UA.md](docs/START_UA.md)**
+> (сервер, Telegram-бот, веб-панель, крок за кроком).
+
 Finds Solana memecoin **bundlers** (the wallet groups that buy their own launch inside a
 Jito bundle), keeps a track record for each group, and copy-trades only the groups
 that are **in the black**. It buys **dips, not highs**, avoids rugs, and **follows the
 bundle out** when the bundle starts to sell.
 
 ```
-            ┌──────────────── bh run (one process, 24/7) ─────────────────┐
+            ┌──────────────── bh serve (one process, 24/7) ───────────────┐
 PumpPortal  │  record every launch ──► SQLite ◄── analyzer (RPC)           │
  websocket ─┼─► strategy ◄── clusters "in the black" (rebuilt every 15 min)│
             │      │                                                       │
             │      └─► broker: paper (default) | live: sign → Jito bundle  │
+            │  Telegram bot ◄──► service ◄──► web panel (localhost:8080)   │
             └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -36,6 +40,9 @@ one it shows who bundled it and how much they still hold, then picks the token w
 It also builds an **Axiom-style holder panel** (`bh token <MINT>`):
 **Top 10 H., Dev H., Snipers H., Insiders, Bundlers**. These are used as entry filters, and
 as an exit signal when insiders and bundlers unload.
+
+All of it is available from your phone and browser: `bh serve` runs the trading loop
+together with a **Telegram bot** and a **web panel** (Ukrainian interface).
 
 ## Read this first: what the code can and cannot do
 
@@ -66,11 +73,13 @@ as an exit signal when insiders and bundlers unload.
 ## Setup
 
 ```bash
+./install.sh                # venv + install + config.toml + .env (with a web panel password)
+# or by hand:
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[dev,ai]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 51 offline tests
+pytest                      # 62 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -275,19 +284,51 @@ locally, so the key never leaves the process. It is sent as a **Jito bundle**
 `[swap, tip]` and, as a fallback, through RPC (one signature can only land once).
 The fill is read back from the chain.
 
+## Telegram bot and web panel (`bh serve`)
+
+`bh serve` is `bh run` plus a Telegram bot and a web panel, in one process. Both show the
+same things and neither can place orders.
+
+| Telegram | web panel tab | what it does |
+|---|---|---|
+| `/check <mint>` or just paste a mint | Перевірка токена | LARP check + holder panel + dev group |
+| `/narrative <text / link / mint>` or just type words | Наратив | narrative + bundle analysis and pick |
+| `/watch <narrative>`, `/unwatch` | – | alert on every new launch that joins the narrative |
+| `/clusters`, `/cluster <id or wallet>` | Групи бандлерів | groups in the black, their wallets, tokens, timing |
+| `/positions` | Угоди | the bot's trades |
+| `/status` | Огляд | mode, recorded launches, groups, PnL, what it is watching |
+| automatic messages | – | every buy and sell (`[telegram] notify_trades`) |
+
+Interactive checks use quick funder lookups instead of full wallet profiles (seconds, not
+minutes). At most 2 run at once and results are cached for a minute, to protect your RPC plan.
+
+Access control:
+- **Telegram** answers only chat ids in `BH_TELEGRAM_ALLOWED_IDS`. Anyone else is told their
+  own id and nothing more.
+- **Web panel** listens on 127.0.0.1:8080. On any other address, `BH_WEB_PASSWORD` is required
+  (HTTP basic auth).
+
+Token names and links are written by whoever launched the token. The Telegram bot escapes
+them, and the page inserts them as text only under a strict Content-Security-Policy.
+
 ## Run it 24/7 ("upload once, it runs by itself")
 
 ```bash
-cp config.example.toml config.toml && cp .env.example .env   # edit both
+./install.sh --docker        # config.toml + .env + web panel password
+nano .env                    # BH_RPC_URL, BH_TELEGRAM_TOKEN
 docker compose up -d --build
 docker compose logs -f
 ```
 
-The `bot` service runs `bh run`: one websocket and one SQLite file in `./data`.
-It records every launch, analyzes bundled ones once they are `min_age_s` old,
-rebuilds clusters every `rebuild_clusters_every_s`, subscribes to the wallets of
-clusters in the black, and trades. To trade live, add `--live` to `command:` and
-`BH_LIVE_TRADING=1` to `.env`.
+The `bot` service runs `bh serve`: one websocket and one SQLite file in `./data`.
+- It records every launch and analyzes bundled ones once they are `min_age_s` old.
+- It rebuilds clusters every `rebuild_clusters_every_s` and subscribes to the wallets of
+  clusters in the black, then trades.
+- The web panel is published on the server's `127.0.0.1:8080`; open it through
+  `ssh -L 8080:localhost:8080 user@server`.
+- To trade live, add `--live` to `command:` and `BH_LIVE_TRADING=1` to `.env`.
+
+Step-by-step for non-programmers, in Ukrainian: [docs/START_UA.md](docs/START_UA.md).
 
 For speed, rent a VPS in the same region as a Jito block engine (Frankfurt,
 Amsterdam, New York, Tokyo, Salt Lake City) and set `BH_JITO_URL` to that region,
@@ -342,6 +383,10 @@ All parameters are in `config.example.toml`.
 | `holders.py` | Axiom-style holder panel: group classification, live balances via associated token accounts, top 10 without pools |
 | `larp.py` | LARP check: metadata (Metaplex / Token-2022), socials, copycats, website + domain age, optional X and Claude verdict |
 | `narrative.py` | narrative + bundle analysis: find every token of a narrative (DB + DexScreener), label original / copy / LARP and the bundle state, pick, live watch |
+| `service.py` | one service behind Telegram and the web panel: checks, narratives, clusters, status, live narrative watches |
+| `telegram.py` | Telegram bot (Bot API long polling, allow-list, phone-friendly reports) |
+| `web.py`, `webui/` | web panel: aiohttp JSON API + one static page (Ukrainian UI) |
+| `i18n.py` | Ukrainian wording for strategy reasons and verdicts |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |
 | `execution.py` | `PaperBroker`, `LiveBroker` (PumpPortal tx + local signing + Jito bundle + RPC fallback) |

@@ -1,11 +1,17 @@
-# 24/7 automatic mode: record every launch, analyze bundles, rebuild clusters, copy-trade.
-# Paper trading unless you add --live to the command AND BH_LIVE_TRADING=1 to .env.
+# Everything in one container: trading bot (paper by default) + Telegram bot + web panel.
+# First run:  ./install.sh --docker   (creates config.toml, .env and a web panel password)
+# Start:      docker compose up -d --build
+# Live money: add "--live" to command AND BH_LIVE_TRADING=1 to .env (read docs/START_UA.md first)
 services:
   bot:
     build: .
     restart: unless-stopped
     env_file: .env
+    environment:
+      BH_WEB_HOST: 0.0.0.0              # inside the container only, see ports
+    ports:
+      - "127.0.0.1:8080:8080"           # web panel reachable from the server itself (use an SSH tunnel)
     volumes:
       - ./data:/app/data
       - ./config.toml:/app/config.toml:ro
-    command: ["run"]
+    command: ["serve"]

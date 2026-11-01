@@ -91,6 +91,14 @@ dexscreener = true         # search DexScreener too, not only your recorded laun
 max_analyze = 10           # tokens analyzed in depth per query
 watch_delay_s = 20         # --watch: let the bundle land before analyzing
 
+[telegram]                 # token / allowed ids are in .env
+notify_trades = true       # message on every buy and sell
+
+[web]
+enabled = true
+host = "127.0.0.1"         # Docker sets 0.0.0.0 inside the container; then BH_WEB_PASSWORD is required
+port = 8080
+
 [auto]
 analyze_every_s = 300
 analyze_batch = 20

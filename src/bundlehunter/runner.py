@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from typing import Awaitable, Callable
 
 from .analyzer import Analyzer
 from .clusters import build_clusters
@@ -24,6 +25,7 @@ from .constants import LAMPORTS_PER_SOL
 from .execution import Broker
 from .feeds import PumpPortalFeed
 from .holders import HolderScanner, TokenPanel, format_panel
+from .i18n import ua_reason
 from .larp import LarpChecker
 from .models import MarketEvent
 from .parser import parse_transaction
@@ -56,6 +58,9 @@ class BotRunner:
             raise ValueError("strategy.require_larp_check needs a LarpChecker")
         self.larp = larp
         self._meta_pending = 0
+        self.notify: Callable[[str], Awaitable[None]] | None = None  # e.g. Telegram: trades, watches
+        self.create_listeners: list[Callable[[MarketEvent], None]] = []  # e.g. narrative watches
+        self.started_at = time.time()
         self.strategy = Strategy(cfg.strategy, {}, set())
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
@@ -108,11 +113,24 @@ class BotRunner:
                 self._recent_creates[ev.mint] = ev
                 if len(self._recent_creates) > 5000:
                     self._recent_creates.popitem(last=False)
+                for listener in self.create_listeners:
+                    try:
+                        listener(ev)
+                    except Exception:
+                        log.exception("create listener failed")
                 if self.cfg.feed.fetch_metadata and self.larp and ev.uri and self._meta_pending < 200:
                     self._spawn(self._record_metadata(ev.mint, ev.uri))
                 if self.cfg.feed.funder_lookup_on_create and ev.wallet not in self.strategy.wallet_to_cluster:
                     self._spawn(self._funder_lookup(ev))
             self._handle(ev)
+
+    def _token_name(self, mint: str) -> str:
+        tok = self.store.token(mint) or {}
+        return f"{tok.get('symbol') or '?'} {mint[:6]}…{mint[-4:]}"
+
+    def _say(self, text: str) -> None:
+        if self.notify and self.cfg.telegram.notify_trades:
+            self._spawn(self.notify(text))
 
     async def _record_metadata(self, mint: str, uri: str) -> None:
         """Keep every launch's socials so the LARP check can spot copies of them later."""
@@ -259,6 +277,10 @@ class BotRunner:
                 )
                 self.strategy.on_buy_filled(a.mint, fill.price, fill.tokens, fill.sol, fill.ts, a.reason, pid)
                 log.info("BUY %s %.4f SOL @ %.3e (%s) cluster %s", a.mint, fill.sol, fill.price, a.reason, a.cluster_id)
+                self._say(
+                    f"🟢 КУПІВЛЯ{'' if self.broker.live else ' (paper)'} {self._token_name(a.mint)}\n"
+                    f"{fill.sol:.4f} SOL @ {fill.price:.3e}\nпричина: {ua_reason(a.reason)}\nгрупа: {a.cluster_id}"
+                )
             else:
                 pos = self.strategy.positions.get(a.mint)
                 fill = await self.broker.sell(a.mint, a.token_amount, a.ref_price)
@@ -272,6 +294,12 @@ class BotRunner:
                         exit_sig=fill.signature, reason_close=a.reason, pnl_sol=pnl,
                     )
                 log.info("SELL %s -> %.4f SOL, pnl %+.4f (%s)", a.mint, fill.sol, pnl, a.reason)
+                size = pos.size_sol if pos else 0.0
+                pct = f" ({pnl / size:+.0%})" if size else ""
+                self._say(
+                    f"{'✅' if pnl >= 0 else '🔻'} ПРОДАЖ{'' if self.broker.live else ' (paper)'} {self._token_name(a.mint)}\n"
+                    f"отримано {fill.sol:.4f} SOL, PnL {pnl:+.4f} SOL{pct}\nпричина: {ua_reason(a.reason)}"
+                )
         except Exception as exc:
             log.exception("order %s %s failed: %s", a.side, a.mint, exc)
             (self.strategy.on_buy_failed if a.side == "buy" else self.strategy.on_sell_failed)(a.mint)

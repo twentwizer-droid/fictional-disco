@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bundlehunter</title>
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header>
+  <div class="brand">bundlehunter</div>
+  <nav id="tabs">
+    <button data-tab="overview" class="active">Огляд</button>
+    <button data-tab="check">Перевірка токена</button>
+    <button data-tab="narrative">Наратив</button>
+    <button data-tab="clusters">Групи бандлерів</button>
+    <button data-tab="positions">Угоди</button>
+  </nav>
+</header>
+
+<main>
+  <section id="overview" class="tab active">
+    <div id="mode-banner" class="banner"></div>
+    <div id="cards" class="cards"></div>
+    <h2>Зараз стежу</h2>
+    <div id="watching"></div>
+    <h2>Відкриті позиції</h2>
+    <div id="open-positions"></div>
+  </section>
+
+  <section id="check" class="tab">
+    <form id="check-form" class="search">
+      <input id="check-input" placeholder="Адреса токена (mint)" autocomplete="off" spellcheck="false" required>
+      <label class="toggle"><input type="checkbox" id="check-ai"> ШІ-вердикт</label>
+      <button type="submit">Перевірити</button>
+    </form>
+    <div id="check-result" class="result"></div>
+  </section>
+
+  <section id="narrative" class="tab">
+    <form id="narrative-form" class="search">
+      <input id="narrative-input" placeholder="Наратив: слова, посилання на X / сайт або адреса токена" autocomplete="off" required>
+      <button type="submit">Аналізувати</button>
+    </form>
+    <div id="narrative-result" class="result"></div>
+  </section>
+
+  <section id="clusters" class="tab">
+    <label class="toggle"><input type="checkbox" id="clusters-all"> показати всі групи, а не лише «в плюсі»</label>
+    <div id="clusters-table"></div>
+    <div id="cluster-detail"></div>
+  </section>
+
+  <section id="positions" class="tab">
+    <div id="positions-table"></div>
+  </section>
+</main>
+
+<footer>Лише для досліджень, не фінансова порада. Більшість угод з мемкоїнами збиткові.</footer>
+</body>
+</html>

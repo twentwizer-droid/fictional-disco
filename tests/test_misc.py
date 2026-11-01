@@ -36,3 +36,23 @@ def test_paper_broker_applies_slippage_and_fees():
     assert buy.price == pytest.approx(1.1e-6) and buy.sol == pytest.approx(1.01)
     sell = b.fill_sell("M", buy.tokens, 2e-6)
     assert sell.sol == pytest.approx(buy.tokens * 1.8e-6 - 0.01)
+
+
+def test_dotenv_inline_comments_and_quotes(tmp_path, monkeypatch):
+    from bundlehunter.config import load_dotenv
+
+    env = tmp_path / ".env"
+    env.write_text(
+        "A_TOKEN=   # from @BotFather\n"
+        "B_URL=https://x.example/?api-key=k#frag   # comment\n"
+        "C_PW='p # not a comment'\n"
+        "# D_SKIPPED=1\n"
+        "E_EMPTY=\n"
+    )
+    for k in ("A_TOKEN", "B_URL", "C_PW", "D_SKIPPED", "E_EMPTY"):
+        monkeypatch.delenv(k, raising=False)
+    load_dotenv(env)
+    import os
+
+    assert os.environ["A_TOKEN"] == "" and os.environ["B_URL"] == "https://x.example/?api-key=k#frag"
+    assert os.environ["C_PW"] == "p # not a comment" and "D_SKIPPED" not in os.environ and os.environ["E_EMPTY"] == ""

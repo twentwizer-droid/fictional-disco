@@ -207,6 +207,12 @@ class Store:
         q = f"SELECT * FROM tokens WHERE {where} ORDER BY create_time LIMIT ?"
         return [dict(r) for r in self.db.execute(q, (*[f"%{t.lower()}%" for t in terms], limit))]
 
+    def token_counts(self) -> dict[str, int]:
+        return {r["status"]: r["n"] for r in self.db.execute("SELECT status, COUNT(*) AS n FROM tokens GROUP BY status")}
+
+    def wallet_count(self) -> int:
+        return int(self.db.execute("SELECT COUNT(*) FROM wallets").fetchone()[0])
+
     def pending_tokens(self, min_age_s: float, limit: int) -> list[str]:
         cutoff = time.time() - min_age_s
         rows = self.db.execute(

@@ -129,6 +129,7 @@ class NarrativeAnalyzer:
     ) -> None:
         self.cfg, self.store, self.larp, self.scanner = cfg, store, larp, scanner
         self.http = http or httpx.AsyncClient(timeout=10)
+        self._link_sem = asyncio.Semaphore(4)
 
     async def close(self) -> None:
         await self.http.aclose()
@@ -294,28 +295,50 @@ class NarrativeAnalyzer:
 
     # -- verdict -----------------------------------------------------------------------
 
-    def pick(self, members: list[Member]) -> tuple[Member | None, str]:
+    PICK_TEXT = {
+        "en": {
+            "none": "no token of this narrative passes the LARP check: it looks borrowed / copied everywhere",
+            "token": "{name}: {label} token of this narrative, LARP score {score}",
+            "black": "bundled by {cid}, a group in the black ({pnl:+.1f} SOL over {n} launches, {wr:.0%} wins): "
+                     "the copy-trade target, exit when they sell",
+            "heavy": "but the bundle is heavy (bundlers {b:.0%}, insiders {i:.0%}): dump risk",
+            "sold": "the bundle has already sold most of its bag",
+            "clean": "bundle is small / clean",
+            "labels": {"ORIGINAL": "original", "SIDE TOKEN": "side", "FIRST, SUSPICIOUS": "first, suspicious"},
+        },
+        "ua": {
+            "none": "жоден токен цього наратива не пройшов LARP-перевірку: схоже, наратив позичений чи скопійований",
+            "token": "{name}: {label} токен цього наратива, LARP-оцінка {score}",
+            "black": "забандлила група {cid}, яка в плюсі ({pnl:+.1f} SOL за {n} запусків, {wr:.0%} в плюс): "
+                     "ціль для копіювання, виходити разом з нею",
+            "heavy": "але бандл важкий (бандлери {b:.0%}, інсайдери {i:.0%}): ризик скиду",
+            "sold": "бандл уже продав більшість своїх токенів",
+            "clean": "бандл малий / чистий",
+            "labels": {"ORIGINAL": "оригінальний", "SIDE TOKEN": "побічний", "FIRST, SUSPICIOUS": "перший, підозрілий"},
+        },
+    }
+
+    def pick(self, members: list[Member], lang: str = "en") -> tuple[Member | None, str]:
+        t = self.PICK_TEXT[lang]
         max_larp = self.cfg.strategy.max_larp_score
         ok = [m for m in members if m.larp and m.larp.score <= max_larp and m.narrative_label not in ("LARP", "COPY")]
         if not ok:
-            return None, "no token of this narrative passes the LARP check: it looks borrowed / copied everywhere"
+            return None, t["none"]
         ok.sort(key=lambda m: (m.narrative_label != "ORIGINAL", not m.cluster_black, -(m.market_cap or 0)))
         best = ok[0]
         name = f"{best.symbol or best.name or '?'} ({_short(best.mint)})"
-        parts = [f"{name}: {best.narrative_label.lower()} token of this narrative, LARP score {best.larp.score if best.larp else '?'}"]
+        label = t["labels"].get(best.narrative_label, best.narrative_label.lower())
+        parts = [t["token"].format(name=name, label=label, score=best.larp.score if best.larp else "?")]
         m = best.metrics or {}
         if best.cluster_black and best.cluster:
             c = best.cluster
-            parts.append(
-                f"bundled by {c.cluster_id}, a group in the black ({c.realized_pnl:+.1f} SOL over {len(c.launches)} launches, "
-                f"{c.win_rate:.0%} wins): the copy-trade target, exit when they sell"
-            )
+            parts.append(t["black"].format(cid=c.cluster_id, pnl=c.realized_pnl, n=len(c.launches), wr=c.win_rate))
         elif best.bundle_label == "HEAVY BUNDLE":
-            parts.append(f"but the bundle is heavy (bundlers {m.get('bundlers_pct', 0):.0%}, insiders {m.get('insiders_pct') or 0:.0%}): dump risk")
+            parts.append(t["heavy"].format(b=m.get("bundlers_pct") or 0, i=m.get("insiders_pct") or 0))
         elif best.bundle_label == "BUNDLE SOLD":
-            parts.append("the bundle has already sold most of its bag")
+            parts.append(t["sold"])
         elif best.bundle_label == "CLEAN":
-            parts.append("bundle is small / clean")
+            parts.append(t["clean"])
         return best, "; ".join(parts)
 
     # -- live watch --------------------------------------------------------------------
@@ -323,39 +346,41 @@ class NarrativeAnalyzer:
     def matches_create(self, q: Query, ev: MarketEvent) -> bool:
         return _matches_terms(q.terms, ev.name, ev.symbol)
 
+    async def _link_match(self, q: Query, ev: MarketEvent) -> bool:
+        if not ev.uri or not (q.twitter or q.website):
+            return False
+        async with self._link_sem:
+            meta = await self.larp.store_offchain(ev.mint, ev.uri)
+        return bool(
+            (q.twitter and norm_link(meta.twitter) == q.twitter)
+            or (q.website and norm_link(meta.website).split("/")[0] == q.website)
+        )
+
+    async def on_create(self, q: Query, ev: MarketEvent, on_member: Any) -> Member | None:
+        """One new launch: if it joins the narrative, analyze it once its bundle has landed."""
+        if not self.matches_create(q, ev) and not await self._link_match(q, ev):
+            return None
+        await asyncio.sleep(self.cfg.narrative.watch_delay_s)
+        member = Member(ev.mint, ev.name, ev.symbol, ev.ts, {"live"})
+        family = await self.find(Query(q.raw, list(q.terms), q.twitter, q.website), use_dex=False)
+        await self.analyze([member], limit=1)
+        first = min((m for m in family if m.create_time), key=lambda m: m.create_time or 0, default=None)
+        member.first = bool(first and first.mint == ev.mint)
+        result = on_member(member, len(family))
+        if asyncio.iscoroutine(result):
+            await result
+        return member
+
     async def watch(self, q: Query, feed: Any, on_member: Any) -> None:
-        """Report every new launch that joins the narrative, analyzed once its bundle has landed."""
+        """Standalone watch with its own feed (`bh narrative --watch`). `bh serve` uses on_create."""
         tasks: set[asyncio.Task] = set()
-        sem = asyncio.Semaphore(4)
-
-        async def link_match(ev: MarketEvent) -> bool:
-            if not ev.uri:
-                return False
-            async with sem:
-                meta = await self.larp.store_offchain(ev.mint, ev.uri)
-            return bool(
-                (q.twitter and norm_link(meta.twitter) == q.twitter)
-                or (q.website and norm_link(meta.website).split("/")[0] == q.website)
-            )
-
-        async def handle(ev: MarketEvent) -> None:
-            if not self.matches_create(q, ev) and not ((q.twitter or q.website) and await link_match(ev)):
-                return
-            await asyncio.sleep(self.cfg.narrative.watch_delay_s)
-            members = [Member(ev.mint, ev.name, ev.symbol, ev.ts, {"live"})]
-            family = await self.find(Query(q.raw, list(q.terms), q.twitter, q.website), use_dex=False)
-            await self.analyze(members, limit=1)
-            first = min((m for m in family if m.create_time), key=lambda m: m.create_time or 0, default=None)
-            members[0].first = bool(first and first.mint == ev.mint)
-            on_member(members[0], len(family))
-
         await feed.subscribe_new_tokens()
         async for ev in feed.events():
             if ev.kind != "create":
                 continue
             self.store.upsert_token(ev.mint, creator=ev.wallet, create_time=ev.ts, name=ev.name, symbol=ev.symbol,
                                     uri=ev.uri or None, source="pumpportal")
-            task = asyncio.create_task(handle(ev))
+            task = asyncio.create_task(self.on_create(q, ev, on_member))
             tasks.add(task)
             task.add_done_callback(tasks.discard)
 
@@ -434,6 +459,7 @@ def family_to_dict(q: Query, members: list[Member], pick: tuple[Member | None, s
                 "narrative": m.narrative_label, "bundle": m.bundle_label, "first": m.first,
                 "larp_score": m.larp.score if m.larp else None,
                 "larp_findings": [f"[{f.level}] {f.text}" for f in m.larp.findings] if m.larp else [],
+                "larp_findings_ua": [f"[{f.level}] {f.text_ua}" for f in m.larp.findings] if m.larp else [],
                 "holder_panel": m.metrics, "dev_cluster": m.cluster.cluster_id if m.cluster else None,
                 "dev_cluster_in_the_black": m.cluster_black, "error": m.error or None,
             }

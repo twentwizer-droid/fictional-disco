@@ -152,6 +152,24 @@ class NarrativeConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Telegram bot (bh serve). Token and allowed chat ids come from .env: BH_TELEGRAM_TOKEN,
+    BH_TELEGRAM_ALLOWED_IDS. Without allowed ids the bot answers nobody but tells you your id."""
+
+    notify_trades: bool = True  # message on every buy / sell
+    api_url: str = "https://api.telegram.org"
+
+
+@dataclass
+class WebConfig:
+    """Web panel (bh serve). Anything but localhost needs BH_WEB_PASSWORD."""
+
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8080
+
+
+@dataclass
 class AutoConfig:
     analyze_every_s: float = 300.0
     analyze_batch: int = 20
@@ -170,6 +188,8 @@ class Config:
     feed: FeedConfig = field(default_factory=FeedConfig)
     larp: LarpConfig = field(default_factory=LarpConfig)
     narrative: NarrativeConfig = field(default_factory=NarrativeConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
+    web: WebConfig = field(default_factory=WebConfig)
     auto: AutoConfig = field(default_factory=AutoConfig)
 
 
@@ -198,7 +218,14 @@ def load_dotenv(path: str | Path = ".env") -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+        value = value.strip()
+        if value[:1] in ("'", '"') and value[1:].find(value[0]) >= 0:
+            value = value[1 : 1 + value[1:].find(value[0])]  # quoted: take it literally
+        elif value.startswith("#"):
+            value = ""  # KEY=   # comment
+        else:
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()  # drop an inline comment
+        os.environ.setdefault(key.strip(), value)
 
 
 def load_config(path: str | Path | None = None) -> Config:
@@ -216,4 +243,8 @@ def load_config(path: str | Path | None = None) -> Config:
         cfg.db_path = os.environ["BH_DB_PATH"]
     if os.environ.get("BH_JITO_URL"):
         cfg.execution.jito_block_engine = os.environ["BH_JITO_URL"]
+    if os.environ.get("BH_WEB_HOST"):
+        cfg.web.host = os.environ["BH_WEB_HOST"]
+    if os.environ.get("BH_WEB_PORT"):
+        cfg.web.port = int(os.environ["BH_WEB_PORT"])
     return cfg

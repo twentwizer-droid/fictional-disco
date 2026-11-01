@@ -22,8 +22,11 @@ from .larp import LarpChecker, format_report
 from .narrative import HEADER, NarrativeAnalyzer, family_to_dict, format_family, member_line, parse_query
 from .rpc import SolanaRpc
 from .runner import BotRunner
+from .service import Service
 from .storage import Store
 from .strategy import Strategy
+from .telegram import TelegramBot, started_line
+from .web import check_bind, serve_web
 
 
 def _rpc(cfg: Config) -> SolanaRpc:
@@ -292,9 +295,11 @@ def cmd_backtest(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     print(f"trades {len(res.trades)}, win rate {res.win_rate:.0%}, total pnl {res.pnl:+.4f} SOL")
 
 
-async def cmd_run(cfg: Config, store: Store, args: argparse.Namespace) -> None:
-    trade_rpc = _rpc(cfg)
-    analysis_rpc = _rpc(cfg)
+async def _build_runner(
+    cfg: Config, store: Store, args: argparse.Namespace
+) -> tuple[BotRunner, list[SolanaRpc], LarpChecker]:
+    """The trading loop shared by `bh run` and `bh serve` (paper unless --live + BH_LIVE_TRADING=1)."""
+    trade_rpc, analysis_rpc = _rpc(cfg), _rpc(cfg)
     if args.live:
         if os.environ.get("BH_LIVE_TRADING") != "1":
             sys.exit("refusing to trade live: set BH_LIVE_TRADING=1 as well as --live (start with small buy_sol)")
@@ -312,12 +317,48 @@ async def cmd_run(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     runner = BotRunner(
         cfg, store, trade_rpc, broker, PumpPortalFeed(cfg.feed.pumpportal_ws), analyzer, scanner, larp
     )
+    return runner, [trade_rpc, analysis_rpc], larp
+
+
+async def cmd_run(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    runner, rpcs, larp = await _build_runner(cfg, store, args)
     try:
         await runner.run()
     finally:
         await larp.close()
-        await trade_rpc.close()
-        await analysis_rpc.close()
+        for rpc in rpcs:
+            await rpc.close()
+
+
+async def cmd_serve(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Everything in one process: trading loop + Telegram bot + web panel."""
+    runner, rpcs, larp = await _build_runner(cfg, store, args)
+    service = Service(cfg, store, rpcs[1], runner=runner)  # interactive requests share the analysis RPC client
+    jobs = [runner.run()]
+    bot = None
+    token = os.environ.get("BH_TELEGRAM_TOKEN")
+    if token and not args.no_telegram:
+        ids = TelegramBot.parse_ids(os.environ.get("BH_TELEGRAM_ALLOWED_IDS"))
+        bot = TelegramBot(token, ids, service, cfg.telegram.api_url)
+        runner.notify = bot.notify
+        jobs.append(bot.run())
+        if not ids:
+            logging.warning("BH_TELEGRAM_ALLOWED_IDS is empty: send /start to your bot, it will tell you your id")
+    else:
+        logging.info("Telegram bot off (set BH_TELEGRAM_TOKEN in .env to turn it on)")
+    if cfg.web.enabled and not args.no_web:
+        password = os.environ.get("BH_WEB_PASSWORD") or None
+        check_bind(cfg.web.host, password)
+        jobs.append(serve_web(service, cfg.web.host, cfg.web.port, password))
+    if bot:
+        await bot.notify(started_line(service))
+    try:
+        await asyncio.gather(*jobs)
+    finally:
+        await service.close()
+        await larp.close()
+        for rpc in rpcs:
+            await rpc.close()
 
 
 def cmd_positions(cfg: Config, store: Store, args: argparse.Namespace) -> None:
@@ -394,6 +435,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--live", action="store_true", help="send real transactions (also needs BH_LIVE_TRADING=1)")
     s.add_argument("--no-analyze", action="store_true", help="do not analyze recorded launches in the background")
 
+    s = sub.add_parser("serve", help="everything in one: trading loop + Telegram bot + web panel (paper by default)")
+    s.add_argument("--live", action="store_true", help="send real transactions (also needs BH_LIVE_TRADING=1)")
+    s.add_argument("--no-analyze", action="store_true", help="do not analyze recorded launches in the background")
+    s.add_argument("--no-telegram", action="store_true")
+    s.add_argument("--no-web", action="store_true")
+
     sub.add_parser("positions", help="list the bot's paper/live positions")
     return p
 
@@ -418,6 +465,7 @@ def main(argv: list[str] | None = None) -> None:
         "cluster": cmd_cluster,
         "backtest": cmd_backtest,
         "run": cmd_run,
+        "serve": cmd_serve,
         "positions": cmd_positions,
     }
     try:

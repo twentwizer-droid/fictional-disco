@@ -63,6 +63,11 @@ class Finding:
     level: str  # red | yellow | green | info
     code: str
     text: str
+    ua: str = ""  # Ukrainian text for the Telegram bot and the web panel
+
+    @property
+    def text_ua(self) -> str:
+        return self.ua or self.text
 
 
 @dataclass
@@ -162,6 +167,13 @@ def _ago(ts: float | None) -> str:
         return "?"
     s = time.time() - ts
     return f"{s / 60:.0f} min ago" if s < 7200 else f"{s / 3600:.0f} h ago" if s < 172800 else f"{s / 86400:.0f} days ago"
+
+
+def _ago_ua(ts: float | None) -> str:
+    if not ts:
+        return "?"
+    s = time.time() - ts
+    return f"{s / 60:.0f} хв тому" if s < 7200 else f"{s / 3600:.0f} год тому" if s < 172800 else f"{s / 86400:.0f} дн тому"
 
 
 def _short(mint: str) -> str:
@@ -347,41 +359,51 @@ class LarpChecker:
     def contract_findings(meta: TokenMeta) -> list[Finding]:
         out = []
         if meta.mint_authority:
-            out.append(Finding("red", "mint_authority", "mint authority is active: more tokens can be minted"))
+            out.append(Finding("red", "mint_authority", "mint authority is active: more tokens can be minted",
+                               "mint authority активний: можуть надрукувати ще токенів"))
         if meta.freeze_authority:
-            out.append(Finding("red", "freeze_authority", "freeze authority is active: your tokens can be frozen"))
+            out.append(Finding("red", "freeze_authority", "freeze authority is active: your tokens can be frozen",
+                               "freeze authority активний: твої токени можуть заморозити"))
         if meta.mutable:
-            out.append(Finding("yellow", "mutable_meta", "metadata is mutable: name, image and socials can be swapped later"))
+            out.append(Finding("yellow", "mutable_meta", "metadata is mutable: name, image and socials can be swapped later",
+                               "метадані можна змінити: назву, картинку й соцмережі можуть підмінити пізніше"))
         if meta.source in ("metaplex", "token2022") and not (meta.mint_authority or meta.freeze_authority or meta.mutable):
-            out.append(Finding("green", "contract_ok", "mint/freeze authority revoked, metadata immutable"))
+            out.append(Finding("green", "contract_ok", "mint/freeze authority revoked, metadata immutable",
+                               "mint/freeze authority відкликані, метадані незмінні"))
         return out
 
     def social_findings(self, meta: TokenMeta) -> list[Finding]:
         out = []
         if meta.source != "db" and meta.uri and not meta.offchain_ok:
-            out.append(Finding("yellow", "meta_unreachable", "metadata file could not be loaded"))
+            out.append(Finding("yellow", "meta_unreachable", "metadata file could not be loaded", "не вдалося завантажити файл метаданих"))
         if meta.offchain_ok and not (meta.twitter or meta.telegram or meta.website):
-            out.append(Finding("yellow", "no_socials", "no X, Telegram or website at all"))
+            out.append(Finding("yellow", "no_socials", "no X, Telegram or website at all", "немає ні X, ні Telegram, ні сайту"))
         kind, handle = twitter_kind(meta.twitter) if meta.twitter else ("", None)
         famous = {h.lower() for h in self.cfg.famous_handles}
         if kind == "profile" and handle in famous:
             out.append(Finding("red", "famous_account",
-                               f"links to @{handle}'s X profile: famous accounts don't launch pump.fun coins (borrowed credibility)"))
+                               f"links to @{handle}'s X profile: famous accounts don't launch pump.fun coins (borrowed credibility)",
+                               f"посилання на профіль @{handle}: відомі акаунти не запускають монети на pump.fun (позичена довіра)"))
         elif kind == "tweet":
             who = f"@{handle}" if handle else "someone"
             level = "red" if handle in famous else "info"
             out.append(Finding(level, "tweet_narrative",
-                               f"narrative is a tweet by {who}: linking it doesn't mean {who} is involved"))
+                               f"narrative is a tweet by {who}: linking it doesn't mean {who} is involved",
+                               f"наратив — твіт {who if handle else 'когось'}: посилання на нього не означає, що автор причетний"))
         elif kind == "profile":
-            out.append(Finding("info", "verify_account", f"check that @{handle} itself posted this contract address"))
+            out.append(Finding("info", "verify_account", f"check that @{handle} itself posted this contract address",
+                               f"перевір, чи сам @{handle} публікував цей контракт"))
         elif kind == "community":
-            out.append(Finding("info", "x_community", "X link is a community, anyone can create one"))
+            out.append(Finding("info", "x_community", "X link is a community, anyone can create one",
+                               "посилання на X-спільноту: створити її може будь-хто"))
         site = norm_link(meta.website)
         if site and site.split("/")[0] in SOCIAL_DOMAINS:
-            out.append(Finding("yellow", "no_real_site", f"'website' is just a link to {site.split('/')[0]}"))
+            out.append(Finding("yellow", "no_real_site", f"'website' is just a link to {site.split('/')[0]}",
+                               f"«сайт» — це просто посилання на {site.split('/')[0]}"))
         claim = CLAIM_WORDS.search(f"{meta.name} {meta.description}")
         if claim:
-            out.append(Finding("yellow", "claims", f"description claims '{claim.group(0)}': unverified affiliation claim"))
+            out.append(Finding("yellow", "claims", f"description claims '{claim.group(0)}': unverified affiliation claim",
+                               f"в описі заява «{claim.group(0)}»: неперевірена заява про зв'язок"))
         return out
 
     def copycat_findings(self, mint: str, meta: TokenMeta) -> list[Finding]:
@@ -400,19 +422,26 @@ class LarpChecker:
                 "red" if len(before) >= 5 else "yellow", "copycat_name",
                 f"{len(before)} earlier token(s) used the name/ticker '{meta.symbol or meta.name}'; the first was "
                 f"{_short(first['mint'])} ({_ago(first.get('create_time'))}): this one is a copy",
+                f"раніше вже було {len(before)} токен(ів) з назвою/тікером «{meta.symbol or meta.name}»; перший — "
+                f"{_short(first['mint'])} ({_ago_ua(first.get('create_time'))}): цей — копія",
             ))
         elif same:
-            out.append(Finding("info", "first_of_name", f"first '{meta.symbol or meta.name}' in your DB ({len(same)} copies after it)"))
+            out.append(Finding("info", "first_of_name", f"first '{meta.symbol or meta.name}' in your DB ({len(same)} copies after it)",
+                               f"перший «{meta.symbol or meta.name}» у твоїй базі (після нього копій: {len(same)})"))
 
         kind, _ = twitter_kind(meta.twitter) if meta.twitter else ("", None)
         checks = (
-            ("uri", meta.uri, "red", "identical metadata file as {m}: cloned launch"),
-            ("twitter", norm_link(meta.twitter), "red", "same X link as earlier token {m}: copied socials (classic LARP)"),
-            ("telegram", norm_link(meta.telegram), "red", "same Telegram as earlier token {m}: copied socials"),
-            ("website", norm_link(meta.website), "red", "same website as earlier token {m}: copied socials"),
-            ("image", norm_link(meta.image), "yellow", "same image as earlier token {m}"),
+            ("uri", meta.uri, "red", "identical metadata file as {m}: cloned launch",
+             "ідентичний файл метаданих, як у {m}: клон запуску"),
+            ("twitter", norm_link(meta.twitter), "red", "same X link as earlier token {m}: copied socials (classic LARP)",
+             "той самий X, що в раннього токена {m}: скопійовані соцмережі (класичний LARP)"),
+            ("telegram", norm_link(meta.telegram), "red", "same Telegram as earlier token {m}: copied socials",
+             "той самий Telegram, що в раннього токена {m}: скопійовані соцмережі"),
+            ("website", norm_link(meta.website), "red", "same website as earlier token {m}: copied socials",
+             "той самий сайт, що в раннього токена {m}: скопійовані соцмережі"),
+            ("image", norm_link(meta.image), "yellow", "same image as earlier token {m}", "та сама картинка, що в токена {m}"),
         )
-        for column, value, level, text in checks:
+        for column, value, level, text, text_ua in checks:
             if not value or (column == "website" and value.split("/")[0] in SOCIAL_DOMAINS):
                 continue
             rows = earlier(self.store.tokens_with(column, value, mint))
@@ -420,11 +449,14 @@ class LarpChecker:
                 continue
             if column == "twitter" and kind == "tweet":
                 out.append(Finding("yellow", "crowded_tweet",
-                                   f"{len(rows)} earlier token(s) point at the same tweet: crowded narrative"))
+                                   f"{len(rows)} earlier token(s) point at the same tweet: crowded narrative",
+                                   f"ще {len(rows)} раніших токен(ів) посилаються на той самий твіт: наратив переповнений"))
                 continue
             label = f"{_short(rows[0]['mint'])} ({_ago(rows[0].get('create_time'))})"
+            label_ua = f"{_short(rows[0]['mint'])} ({_ago_ua(rows[0].get('create_time'))})"
             extra = f" and {len(rows) - 1} more" if len(rows) > 1 else ""
-            out.append(Finding(level, f"copied_{column}", text.format(m=label) + extra))
+            extra_ua = f" і ще {len(rows) - 1}" if len(rows) > 1 else ""
+            out.append(Finding(level, f"copied_{column}", text.format(m=label) + extra, text_ua.format(m=label_ua) + extra_ua))
         return out
 
     async def website_findings(self, mint: str, website: str) -> list[Finding]:
@@ -441,26 +473,31 @@ class LarpChecker:
         site_up = bool(page and page[0] < 400)
         if self.cfg.fetch_website:
             if not page or page[0] >= 400:
-                out.append(Finding("yellow", "site_down", f"website {host} is unreachable"))
+                out.append(Finding("yellow", "site_down", f"website {host} is unreachable", f"сайт {host} недоступний"))
             else:
                 html = page[1]
                 shows_ca = mint in html
                 others = [a for a in set(SOL_ADDRESS.findall(html)) - {mint}
                           if a.endswith("pump") or self.store.token(a) is not None]
                 if shows_ca:
-                    out.append(Finding("green", "site_shows_ca", f"{host} shows this contract address"))
+                    out.append(Finding("green", "site_shows_ca", f"{host} shows this contract address", f"{host} показує цей контракт"))
                 elif others:
                     out.append(Finding("red", "site_other_ca",
-                                       f"{host} shows a different contract address ({_short(others[0])}): copied or borrowed site"))
+                                       f"{host} shows a different contract address ({_short(others[0])}): copied or borrowed site",
+                                       f"{host} показує інший контракт ({_short(others[0])}): скопійований або позичений сайт"))
                 else:
-                    out.append(Finding("yellow", "site_no_ca", f"{host} doesn't show this contract address"))
+                    out.append(Finding("yellow", "site_no_ca", f"{host} doesn't show this contract address",
+                                       f"{host} не показує цей контракт"))
         if age_days is not None:
             if age_days < 3:
-                out.append(Finding("yellow", "new_domain", f"domain {registrable_domain(host)} registered {age_days:.0f} day(s) ago"))
+                out.append(Finding("yellow", "new_domain", f"domain {registrable_domain(host)} registered {age_days:.0f} day(s) ago",
+                                   f"домен {registrable_domain(host)} зареєстровано {age_days:.0f} дн. тому"))
             elif age_days > 90 and site_up and not shows_ca:
                 out.append(Finding("red", "borrowed_site",
                                    f"links an established site ({registrable_domain(host)}, {age_days / 365:.1f} years old) "
-                                   "that doesn't mention this token: borrowed website (LARP)"))
+                                   "that doesn't mention this token: borrowed website (LARP)",
+                                   f"посилання на давно існуючий сайт ({registrable_domain(host)}, {age_days / 365:.1f} р.), "
+                                   "який не згадує цей токен: позичений сайт (LARP)"))
         return out
 
     async def domain_age_days(self, host: str) -> float | None:
@@ -489,36 +526,38 @@ class LarpChecker:
                 headers={"Authorization": f"Bearer {token}"},
             )
             if resp.status_code != 200:
-                return [Finding("info", "x_unavailable", f"X API answered {resp.status_code}")]
+                return [Finding("info", "x_unavailable", f"X API answered {resp.status_code}", f"X API відповів {resp.status_code}")]
             found = int(resp.json().get("meta", {}).get("result_count", 0))
         except (httpx.HTTPError, ValueError):
             return []
         if found:
-            return [Finding("green", "x_posted_ca", f"@{handle} posted this contract address")]
-        return [Finding("red", "x_never_posted", f"@{handle} has not posted this contract address in the last 7 days")]
+            return [Finding("green", "x_posted_ca", f"@{handle} posted this contract address", f"@{handle} публікував цей контракт")]
+        return [Finding("red", "x_never_posted", f"@{handle} has not posted this contract address in the last 7 days",
+                        f"@{handle} не публікував цей контракт за останні 7 днів")]
 
     async def holder_findings(self, panel: "TokenPanel", lookup_fresh: bool = True) -> list[Finding]:
         m = panel.metrics()
         out = []
 
-        def pct(key: str, red: float, yellow: float, label: str) -> None:
+        def pct(key: str, red: float, yellow: float, label: str, label_ua: str) -> None:
             v = m.get(key)
-            if v is None:
+            if v is None or v < yellow:
                 return
-            if v >= red:
-                out.append(Finding("red", key, f"{label} hold {v:.1%} of supply"))
-            elif v >= yellow:
-                out.append(Finding("yellow", key, f"{label} hold {v:.1%} of supply"))
+            out.append(Finding("red" if v >= red else "yellow", key, f"{label} hold {v:.1%} of supply",
+                               f"{label_ua} тримають {v:.1%} пропозиції"))
 
-        pct("bundlers_pct", 0.30, 0.15, "bundlers")
-        pct("insiders_pct", 0.20, 0.10, "insiders")
-        pct("snipers_pct", 0.30, 0.20, "snipers")
-        pct("top10_pct", 0.60, 0.40, "top 10 holders")
+        pct("bundlers_pct", 0.30, 0.15, "bundlers", "бандлери")
+        pct("insiders_pct", 0.20, 0.10, "insiders", "інсайдери")
+        pct("snipers_pct", 0.30, 0.20, "snipers", "снайпери")
+        pct("top10_pct", 0.60, 0.40, "top 10 holders", "топ-10 холдерів")
         if (m.get("dev_pct") or 0) >= 0.10:
-            out.append(Finding("yellow", "dev_pct", f"dev holds {m['dev_pct']:.1%} of supply"))
+            out.append(Finding("yellow", "dev_pct", f"dev holds {m['dev_pct']:.1%} of supply",
+                               f"розробник тримає {m['dev_pct']:.1%} пропозиції"))
         linked = panel.groups["linked"]
         if linked.initial and linked.held is not None and linked.held < 0.3 * linked.initial:
-            out.append(Finding("info", "insiders_out", f"dev/bundlers/insiders already sold {1 - linked.held / linked.initial:.0%} of their bag"))
+            sold = 1 - linked.held / linked.initial
+            out.append(Finding("info", "insiders_out", f"dev/bundlers/insiders already sold {sold:.0%} of their bag",
+                               f"розробник, бандлери й інсайдери вже продали {sold:.0%} своїх токенів"))
         if panel.top10:
             owners = [o for o, _ in panel.top10]
             if lookup_fresh and self.analyzer is not None:
@@ -529,9 +568,11 @@ class LarpChecker:
                 if rec and rec["history_complete"] and (rec["tx_count"] or 0) <= self.cfg.fresh_max_txs:
                     fresh += 1
             if fresh >= 5:
-                out.append(Finding("red", "fresh_top10", f"{fresh} of the top 10 holders are fresh wallets: staged distribution"))
+                out.append(Finding("red", "fresh_top10", f"{fresh} of the top 10 holders are fresh wallets: staged distribution",
+                                   f"{fresh} з топ-10 холдерів — свіжі гаманці: штучний розподіл"))
             elif fresh >= 3:
-                out.append(Finding("yellow", "fresh_top10", f"{fresh} of the top 10 holders are fresh wallets"))
+                out.append(Finding("yellow", "fresh_top10", f"{fresh} of the top 10 holders are fresh wallets",
+                                   f"{fresh} з топ-10 холдерів — свіжі гаманці"))
         return out
 
     @staticmethod
@@ -539,14 +580,19 @@ class LarpChecker:
         out = []
         n = len(cluster.launches)
         if n >= 10:
-            out.append(Finding("yellow", "serial_launcher", f"dev group launched {n} tokens (serial launcher)"))
+            out.append(Finding("yellow", "serial_launcher", f"dev group launched {n} tokens (serial launcher)",
+                               f"група розробника запустила {n} токенів (серійний лончер)"))
         exits = [ls.exit_at - ls.created_at for ls in cluster.launches if ls.exit_at and ls.created_at]
         if len(exits) >= 2 and statistics.median(exits) < 600:
-            out.append(Finding("red", "fast_exit", f"dev group usually exits within {statistics.median(exits) / 60:.0f} min of launch"))
+            minutes = statistics.median(exits) / 60
+            out.append(Finding("red", "fast_exit", f"dev group usually exits within {minutes:.0f} min of launch",
+                               f"група розробника зазвичай виходить за {minutes:.0f} хв після запуску"))
         if cluster.closed and cluster.realized_pnl > 0 and cluster.win_rate >= 0.6:
             out.append(Finding("info", "profitable_dev",
                                f"dev group is profitable ({cluster.realized_pnl:+.1f} SOL, {cluster.win_rate:.0%} wins): "
-                               "that money comes from buyers"))
+                               "that money comes from buyers",
+                               f"група розробника прибуткова ({cluster.realized_pnl:+.1f} SOL, {cluster.win_rate:.0%} в плюс): "
+                               "ці гроші — з покупців"))
         return out
 
     async def check(
