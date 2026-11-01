@@ -1,0 +1,66 @@
+# Copy to config.toml and adjust. Secrets (RPC key, private key) go in .env, not here.
+db_path = "data/bundlehunter.db"
+
+[rpc]
+# Put your paid RPC URL (Helius / Triton / QuickNode ...) in .env as BH_RPC_URL.
+max_concurrency = 8
+requests_per_second = 8.0
+
+[analyzer]
+early_slots = 3            # create slot = "bundle", next 3 slots = "snipers"
+max_mint_sig_pages = 10
+max_wallet_sig_pages = 2
+max_wallet_txs = 150
+min_funding_sol = 0.05     # smaller deposits are dust / address poisoning
+min_create_slot_txs = 3    # auto mode: skip launches with fewer txs in the create slot
+min_total_txs = 150        # ...or with too little activity
+min_age_s = 1800           # analyze a launch 30 min after creation
+
+[clusters]
+hub_funder_max_wallets = 40
+ignore_funders = []        # add known CEX hot wallets here
+min_co_launches = 2
+min_co_jaccard = 0.6
+closed_sold_frac = 0.9
+
+[selection]                # which clusters are "in the black"
+min_launches = 3
+min_closed_launches = 2
+min_win_rate = 0.6
+min_total_pnl_sol = 3.0
+min_median_first_sell_s = 20.0
+
+[strategy]
+mode = "dip"               # "dip" (wait for a pullback) or "snipe" (buy immediately)
+buy_sol = 0.05
+max_open_positions = 3
+daily_loss_limit_sol = 0.5
+entry_window_s = 600
+dip_pct = 0.25
+rebound_pct = 0.05
+max_entry_vs_bundle = 4.0
+abort_if_cluster_sold_pct = 0.15
+max_cluster_supply_pct = 0.6
+exit_on_cluster_sell_pct = 0.10
+take_profit_pct = 1.0
+stop_loss_pct = 0.30
+trailing_stop_pct = 0.0
+max_hold_s = 1200
+
+[execution]
+slippage_pct = 15.0
+priority_fee_sol = 0.0005
+use_jito = true
+jito_block_engine = "https://mainnet.block-engine.jito.wtf"   # pick the region closest to your server
+jito_tip_sol = 0.001
+also_send_rpc = true
+paper_slippage_pct = 3.0
+
+[feed]
+record_launches = true
+funder_lookup_on_create = false
+
+[auto]
+analyze_every_s = 300
+analyze_batch = 20
+rebuild_clusters_every_s = 900

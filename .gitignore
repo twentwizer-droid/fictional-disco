@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+data/
+*.db
+*.db-wal
+*.db-shm
+.env
+keypair*.json
+config.toml
+.pytest_cache/

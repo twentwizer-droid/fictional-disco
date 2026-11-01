@@ -1,0 +1,11 @@
+# 24/7 automatic mode: record every launch, analyze bundles, rebuild clusters, copy-trade.
+# Paper trading unless you add --live to the command AND BH_LIVE_TRADING=1 to .env.
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./config.toml:/app/config.toml:ro
+    command: ["run"]

@@ -1,0 +1,255 @@
+"""Command line interface: `bh <command>`."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+from datetime import datetime, timezone
+
+from .analyzer import Analyzer, LaunchReport
+from .backtest import run_backtest
+from .clusters import build_clusters
+from .config import Config, load_config
+from .execution import LiveBroker, PaperBroker, load_keypair
+from .feeds import PumpPortalFeed
+from .rpc import SolanaRpc
+from .runner import BotRunner
+from .storage import Store
+
+
+def _rpc(cfg: Config) -> SolanaRpc:
+    return SolanaRpc(cfg.rpc.url, cfg.rpc.max_concurrency, cfg.rpc.requests_per_second, cfg.rpc.timeout_s)
+
+
+def _ts(t: float | None) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).strftime("%Y-%m-%d %H:%M") if t else "-"
+
+
+def _print_launch(r: LaunchReport) -> None:
+    if r.status == "error":
+        print(f"{r.mint}: ERROR {r.note}")
+        return
+    pct = f"{r.bundle_supply_pct:.1%}" if r.bundle_supply_pct is not None else "?"
+    print(
+        f"{r.mint}: creator {r.creator} slot {r.create_slot} ({_ts(r.create_time)} UTC)\n"
+        f"  bundle: {len(r.bundle_wallets)} wallets + creator, {r.bundle_sol:.3f} SOL, {pct} of supply; "
+        f"snipers: {len(r.sniper_wallets)}"
+    )
+    for w in r.bundle_wallets:
+        print(f"    bundle {w}")
+
+
+async def cmd_analyze(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    rpc = _rpc(cfg)
+    try:
+        an = Analyzer(rpc, store, cfg.analyzer)
+        for mint in args.mints:
+            _print_launch(await an.analyze_launch(mint, profile=not args.no_profile, full=args.full))
+    finally:
+        await rpc.close()
+
+
+async def cmd_seed(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    rpc = _rpc(cfg)
+    try:
+        an = Analyzer(rpc, store, cfg.analyzer)
+        for wallet in args.wallets:
+            print(f"seeding from {wallet} ...")
+            for r in await an.seed_wallet(wallet, args.max_launches):
+                _print_launch(r)
+    finally:
+        await rpc.close()
+
+
+async def cmd_scan(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    if args.min_age is not None:
+        cfg.analyzer.min_age_s = args.min_age
+    rpc = _rpc(cfg)
+    try:
+        results = await Analyzer(rpc, store, cfg.analyzer).process_pending(args.limit)
+        analyzed = [r for r in results if isinstance(r, LaunchReport)]
+        print(f"processed {len(results)} pending launches, deep-analyzed {len(analyzed)}")
+        for r in analyzed:
+            _print_launch(r)
+    finally:
+        await rpc.close()
+
+
+def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    index = build_clusters(store, cfg.clusters)
+    clusters = list(index.clusters.values())
+    if not args.all:
+        clusters = [c for c in clusters if len(c.launches) >= 2 or c.created]
+    clusters.sort(key=lambda c: c.realized_pnl, reverse=True)
+    clusters = clusters[: args.top]
+    if args.json:
+        with open(args.json, "w") as fh:
+            json.dump([c.to_dict(cfg.selection) for c in clusters], fh, indent=2)
+        print(f"wrote {len(clusters)} clusters to {args.json}")
+    hdr = f"{'cluster':12} {'wallets':>7} {'launches':>8} {'closed':>6} {'win%':>5} {'pnl SOL':>9} {'1st sell':>8} {'exit':>7}  black"
+    print(hdr)
+    print("-" * len(hdr))
+    for c in clusters:
+        mfs, mex = c.median_first_sell_s, c.median_exit_s
+        black = "YES" if not c.black_reasons(cfg.selection) else "-"
+        print(
+            f"{c.cluster_id:12} {len(c.wallets):>7} {len(c.launches):>8} {len(c.closed):>6} {c.win_rate:>5.0%} "
+            f"{c.realized_pnl:>9.2f} {(f'{mfs:.0f}s' if mfs is not None else '-'):>8} "
+            f"{(f'{mex:.0f}s' if mex is not None else '-'):>7}  {black}"
+        )
+    print(f"\n{len(index.black(cfg.selection))} of {len(index.clusters)} clusters are in the black (see [selection] in config)")
+
+
+def cmd_cluster(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    index = build_clusters(store, cfg.clusters)
+    cid = index.wallet_to_cluster.get(args.id, args.id)
+    c = index.clusters.get(cid)
+    if not c:
+        sys.exit(f"no cluster or wallet {args.id!r}")
+    d = c.to_dict(cfg.selection)
+    if args.json:
+        print(json.dumps(d, indent=2))
+        return
+    funders = store.funders()
+    print(f"{cid}: {len(c.wallets)} wallets, {len(c.launches)} launches ({c.created} created by them)")
+    print(f"  in the black: {d['in_the_black']}  {'; '.join(d['rejected_because']) if d['rejected_because'] else ''}")
+    print(f"  realized {c.realized_pnl:+.3f} SOL, open {c.unrealized_pnl:+.3f} SOL, win rate {c.win_rate:.0%}")
+    print(f"  WHEN: launch hours UTC {dict(sorted(c.active_hours.items()))}; "
+          f"median first sell {c.median_first_sell_s}s, median exit {c.median_exit_s}s")
+    print(f"  WITH WHOM: partner clusters {dict(c.partners.most_common(5))}")
+    print("  WALLETS:")
+    for w in c.wallets:
+        print(f"    {w}  funder={funders.get(w, '?')}")
+    print("  WHICH TOKENS:")
+    for t in d["tokens"]:  # type: ignore[union-attr]
+        print(
+            f"    {_ts(t['created_at'])}  {t['mint']}  in {t['sol_in']:.3f}  out {t['sol_out']:.3f}  "
+            f"pnl {t['pnl']:+.3f}  {'closed' if t['closed'] else 'open'}  first sell +{t['first_sell_after_s']}s"
+        )
+
+
+def cmd_backtest(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    if args.mode:
+        cfg.strategy.mode = args.mode
+    res = run_backtest(store, cfg, args.split)
+    print(
+        f"train launches {res.train_launches}, test launches {res.test_launches}, "
+        f"clusters in the black (train) {res.black_clusters}, watched {res.watched}"
+    )
+    for t in res.trades:
+        print(
+            f"  {t['mint']}  {t['cluster_id']}  pnl {float(t['pnl_sol']):+.4f} SOL  held {float(t['held_s']):.0f}s  "
+            f"in: {t['reason_open']}  out: {t['reason_close']}"
+        )
+    print(f"trades {len(res.trades)}, win rate {res.win_rate:.0%}, total pnl {res.pnl:+.4f} SOL")
+
+
+async def cmd_run(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    trade_rpc = _rpc(cfg)
+    analysis_rpc = _rpc(cfg)
+    if args.live:
+        if os.environ.get("BH_LIVE_TRADING") != "1":
+            sys.exit("refusing to trade live: set BH_LIVE_TRADING=1 as well as --live (start with small buy_sol)")
+        broker = LiveBroker(cfg.execution, trade_rpc, load_keypair())
+        bal = await trade_rpc.get_balance(broker.pubkey) / 1e9
+        logging.warning("LIVE TRADING from %s (balance %.4f SOL), buy_sol=%s", broker.pubkey, bal, cfg.strategy.buy_sol)
+    else:
+        broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol)
+        logging.info("paper trading (no real orders). Use --live to trade for real.")
+    analyzer = None if args.no_analyze else Analyzer(analysis_rpc, store, cfg.analyzer)
+    runner = BotRunner(cfg, store, trade_rpc, broker, PumpPortalFeed(cfg.feed.pumpportal_ws), analyzer)
+    try:
+        await runner.run()
+    finally:
+        await trade_rpc.close()
+        await analysis_rpc.close()
+
+
+def cmd_positions(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    rows = store.positions()
+    total = 0.0
+    for p in rows:
+        total += p["pnl_sol"] or 0
+        status = f"pnl {p['pnl_sol']:+.4f}" if p["closed_at"] else "OPEN"
+        print(
+            f"#{p['id']} {'LIVE ' if p['live'] else 'paper'} {_ts(p['opened_at'])} {p['mint']} {p['cluster_id']} "
+            f"{p['size_sol']:.3f} SOL {status}  [{p['reason_open']} -> {p['reason_close'] or ''}]"
+        )
+    print(f"{len(rows)} positions, realized pnl {total:+.4f} SOL")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="bh", description="Solana memecoin bundle analyzer and copy-trader")
+    p.add_argument("-c", "--config", help="TOML config file (default: ./config.toml if present)")
+    p.add_argument("-v", "--verbose", action="store_true")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("analyze", help="find the bundle of one or more launches and profile its wallets")
+    s.add_argument("mints", nargs="+")
+    s.add_argument("--full", action="store_true", help="also store the token's early trade history (for backtests)")
+    s.add_argument("--no-profile", action="store_true", help="skip wallet profiling (faster, no funders)")
+
+    s = sub.add_parser("seed", help="start from known bundler wallets and analyze their launches")
+    s.add_argument("wallets", nargs="+")
+    s.add_argument("--max-launches", type=int, default=20)
+
+    s = sub.add_parser("scan", help="process launches recorded by `bh run` (prefilter + analyze)")
+    s.add_argument("--limit", type=int, default=50)
+    s.add_argument("--min-age", type=float, default=None, help="seconds since launch (default from config)")
+
+    s = sub.add_parser("clusters", help="rank bundler clusters by realized PnL")
+    s.add_argument("--top", type=int, default=30)
+    s.add_argument("--all", action="store_true", help="include single-launch clusters")
+    s.add_argument("--json", help="write full cluster details to this file")
+
+    s = sub.add_parser("cluster", help="details for one cluster (id or any wallet in it)")
+    s.add_argument("id")
+    s.add_argument("--json", action="store_true")
+
+    s = sub.add_parser("backtest", help="walk-forward backtest of the strategy on stored launches")
+    s.add_argument("--split", type=float, default=0.7)
+    s.add_argument("--mode", choices=["dip", "snipe"])
+
+    s = sub.add_parser("run", help="live loop: record launches, auto-analyze, copy-trade (paper by default)")
+    s.add_argument("--live", action="store_true", help="send real transactions (also needs BH_LIVE_TRADING=1)")
+    s.add_argument("--no-analyze", action="store_true", help="do not analyze recorded launches in the background")
+
+    sub.add_parser("positions", help="list the bot's paper/live positions")
+    return p
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    cfg = load_config(args.config)
+    store = Store(cfg.db_path)
+    handlers = {
+        "analyze": cmd_analyze,
+        "seed": cmd_seed,
+        "scan": cmd_scan,
+        "clusters": cmd_clusters,
+        "cluster": cmd_cluster,
+        "backtest": cmd_backtest,
+        "run": cmd_run,
+        "positions": cmd_positions,
+    }
+    try:
+        result = handlers[args.cmd](cfg, store, args)
+        if asyncio.iscoroutine(result):
+            asyncio.run(result)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        store.close()
+
+
+if __name__ == "__main__":
+    main()
