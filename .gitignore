@@ -11,3 +11,5 @@ data/
 keypair*.json
 config.toml
 .pytest_cache/
+desk/logs/
+desk/*.db*
