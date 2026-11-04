@@ -21,6 +21,7 @@ from .i18n import verdict_ua
 from .larp import SOL_ADDRESS, _ago_ua, _short
 from .narrative import Member
 from .service import CheckResult, NarrativeResult, Service
+from .traders import TraderStats
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +42,12 @@ HELP = """<b>bundlehunter</b> 🤖
 <b>/cluster</b> &lt;id або гаманець&gt; — деталі групи
 <b>/positions</b> — угоди бота
 <b>/status</b> — стан бота
+
+<b>Сигнали від трейдерів</b>
+<b>/addtrader</b> &lt;гаманець&gt; [назва] — додати трейдера, бот пише про кожну його купівлю
+<b>/traders</b> — твої трейдери з їхнім PnL
+<b>/trader</b> &lt;гаманець&gt; — перевірити будь-який гаманець: чи він у плюсі
+<b>/deltrader</b> &lt;гаманець&gt; — прибрати трейдера
 
 Можна просто надіслати адресу токена або слова наратива."""
 
@@ -176,6 +183,7 @@ def fmt_status(s: dict[str, Any]) -> str:
         f"Груп: {s['clusters']}, в плюсі: {s['black_clusters']}, стежу за {s['tracked_wallets']} гаманцями",
         f"Позиції: відкрито {s['positions_open']}, закрито {s['positions_closed']}",
         f"PnL: paper {s['realized_pnl_sol']['paper']:+.4f} SOL · live {s['realized_pnl_sol']['live']:+.4f} SOL",
+        f"Твоїх трейдерів: {s.get('traders', 0)} · сигналів надіслано: {s.get('signals_sent', 0)}",
     ]
     if s["watching"]:
         lines += ["", "<b>Зараз стежу</b>"]
@@ -184,6 +192,34 @@ def fmt_status(s: dict[str, Any]) -> str:
             lines.append(f"{e(w['symbol'] or '?')} <code>{e(_short(w['mint']))}</code> · {e(w['cluster_id'])} · {state}")
     if s["narrative_watches"]:
         lines += ["", "Наративи: " + e(", ".join(s["narrative_watches"]))]
+    return "\n".join(lines)
+
+
+def fmt_trader(st: TraderStats) -> str:
+    icon = {"в плюсі": "✅", "в мінусі": "🔻"}.get(st.verdict, "❔")
+    hold = f"{st.median_hold_s / 60:.0f} хв" if st.median_hold_s is not None else "–"
+    lines = [
+        f"👤 <b>{e(st.name)}</b> <code>{e(st.address)}</code>",
+        f"{icon} <b>{e(st.verdict)}</b> · PnL {st.realized_pnl:+.2f} SOL · {st.win_rate:.0%} в плюс",
+        f"Токенів {len(st.tokens)}, закрито {len(st.closed)} · середній вхід {st.avg_buy_sol:.2f} SOL · тримає ~{hold}",
+    ]
+    recent = sorted(st.tokens, key=lambda t: t.first_buy or 0, reverse=True)[:8]
+    if recent:
+        lines += ["", "<b>Останні токени</b>"]
+        for t in recent:
+            state = f"{t.pnl:+.2f} SOL" if t.closed else "ще тримає"
+            lines.append(f"<code>{e(_short(t.mint))}</code> {e(_ago_ua(t.first_buy))} · вклав {t.sol_in:.2f} · {state}")
+    return "\n".join(lines)
+
+
+def fmt_traders(rows: list[TraderStats]) -> str:
+    if not rows:
+        return "Трейдерів ще немає. Додай: /addtrader &lt;гаманець&gt; [назва]"
+    lines = ["<b>Твої трейдери</b>", ""]
+    for st in rows:
+        icon = {"в плюсі": "✅", "в мінусі": "🔻"}.get(st.verdict, "❔")
+        lines.append(f"{icon} <b>{e(st.name)}</b> <code>{e(_short(st.address))}</code> · {st.realized_pnl:+.1f} SOL · "
+                     f"{st.win_rate:.0%} · {len(st.closed)} угод")
     return "\n".join(lines)
 
 
@@ -221,6 +257,7 @@ class TelegramBot:
         self.base = f"{api_url.rstrip('/')}/bot{token}"
         self.http = http or httpx.AsyncClient(timeout=70)
         self._tasks: set[asyncio.Task] = set()
+        service.signals.send = self.notify_html
 
     @staticmethod
     def parse_ids(raw: str | None) -> set[int]:
@@ -249,6 +286,11 @@ class TelegramBot:
     async def notify(self, text: str) -> None:
         for chat_id in self.allowed:
             await self.send(chat_id, e(text))
+
+    async def notify_html(self, text: str) -> None:
+        """Signals: already formatted (and escaped) HTML."""
+        for chat_id in self.allowed:
+            await self.send(chat_id, text)
 
     async def run(self) -> None:
         me = await self.api("getMe")
@@ -330,6 +372,23 @@ class TelegramBot:
         elif cmd == "/cluster":
             c = self.service.cluster(arg) if arg else None
             await self.send(chat_id, fmt_cluster(c, sel) if c else "Не знайшов такої групи чи гаманця.")
+        elif cmd == "/addtrader":
+            wallet, _, label = arg.partition(" ")
+            if not wallet:
+                raise ValueError("додай гаманець: /addtrader <гаманець> [назва]")
+            await self.send(chat_id, "⏳ Додаю і завантажую історію угод трейдера, це до 1–2 хвилин…")
+            st = await self.service.add_trader(wallet, label)
+            await self.send(chat_id, "✅ Трейдера додано, сигнали про його купівлі будуть тут.\n\n" + fmt_trader(st))
+        elif cmd == "/deltrader":
+            ok = await self.service.remove_trader(arg) if arg else False
+            await self.send(chat_id, "Прибрано." if ok else "Такого трейдера немає в списку.")
+        elif cmd == "/traders":
+            await self.send(chat_id, fmt_traders(self.service.traders()))
+        elif cmd == "/trader":
+            if not arg:
+                raise ValueError("додай гаманець: /trader <гаманець>")
+            await self.send(chat_id, "⏳ Рахую PnL гаманця…")
+            await self.send(chat_id, fmt_trader(await self.service.trader(arg)))
         elif cmd == "/positions":
             await self.send(chat_id, fmt_positions(self.service.positions()))
         elif cmd == "/status":

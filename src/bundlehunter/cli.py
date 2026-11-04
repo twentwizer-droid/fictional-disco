@@ -226,6 +226,37 @@ async def cmd_narrative(cfg: Config, store: Store, args: argparse.Namespace) -> 
         print(format_family(q, members, pick))
 
 
+async def cmd_trader(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Your trader watchlist (signals come from `bh serve`)."""
+    from .traders import trader_stats
+
+    if args.action == "list":
+        rows = [trader_stats(store, t["address"], t["label"] or "") for t in store.traders()]
+        for st in sorted(rows, key=lambda t: t.realized_pnl, reverse=True):
+            print(f"{st.address}  {st.label or '-':16} pnl {st.realized_pnl:+8.2f} SOL  win {st.win_rate:4.0%}  "
+                  f"closed {len(st.closed):3}  {st.verdict}")
+        if not rows:
+            print("no traders yet: bh trader add <wallet> [label]")
+        return
+    if not args.wallet:
+        sys.exit("give a wallet address")
+    if args.action == "rm":
+        print("removed" if store.remove_trader(args.wallet) else "not in the list")
+        return
+    if args.action == "add":
+        store.add_trader(args.wallet, args.label or "")
+    rpc = _rpc(cfg)
+    try:
+        await Analyzer(rpc, store, cfg.analyzer).profile_wallet(args.wallet, max_txs=cfg.signals.trader_history_txs)
+    finally:
+        await rpc.close()
+    st = trader_stats(store, args.wallet, args.label or "", cfg.clusters.closed_sold_frac)
+    print(f"{st.address}: {st.verdict}, realized {st.realized_pnl:+.2f} SOL, win {st.win_rate:.0%}, "
+          f"{len(st.tokens)} tokens ({len(st.closed)} closed), avg buy {st.avg_buy_sol:.2f} SOL")
+    for t in sorted(st.tokens, key=lambda t: t.first_buy or 0, reverse=True)[:15]:
+        print(f"  {t.mint}  in {t.sol_in:7.3f}  out {t.sol_out:7.3f}  pnl {t.pnl:+7.3f}  {'closed' if t.closed else 'open'}")
+
+
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     index = build_clusters(store, cfg.clusters)
     clusters = list(index.clusters.values())
@@ -418,6 +449,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--db-only", action="store_true", help="no network at all")
     s.add_argument("--json", action="store_true")
 
+    s = sub.add_parser("trader", help="trader watchlist for signals: add / rm / list / show")
+    s.add_argument("action", choices=["add", "rm", "list", "show"])
+    s.add_argument("wallet", nargs="?")
+    s.add_argument("label", nargs="?", default="")
+
     s = sub.add_parser("clusters", help="rank bundler clusters by realized PnL")
     s.add_argument("--top", type=int, default=30)
     s.add_argument("--all", action="store_true", help="include single-launch clusters")
@@ -460,6 +496,7 @@ def main(argv: list[str] | None = None) -> None:
         "scan": cmd_scan,
         "token": cmd_token,
         "check": cmd_check,
+        "trader": cmd_trader,
         "narrative": cmd_narrative,
         "clusters": cmd_clusters,
         "cluster": cmd_cluster,

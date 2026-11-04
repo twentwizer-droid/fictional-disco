@@ -207,11 +207,13 @@ class Analyzer:
         found = await asyncio.gather(*(self.quick_funder(w) for w in wallets), return_exceptions=True)
         return {w: f for w, f in zip(wallets, found, strict=False) if isinstance(f, str)}
 
-    async def profile_wallet(self, wallet: str) -> dict[str, object]:
+    async def profile_wallet(self, wallet: str, max_txs: int | None = None) -> dict[str, object]:
         """Store a wallet's recent trades and find its funder (first meaningful SOL deposit)."""
-        sigs, complete = await self.rpc.signatures(wallet, max_pages=self.cfg.max_wallet_sig_pages)
+        limit = max_txs or self.cfg.max_wallet_txs
+        pages = max(self.cfg.max_wallet_sig_pages, (limit + 999) // 1000)
+        sigs, complete = await self.rpc.signatures(wallet, max_pages=pages)
         ok = [s for s in sigs if not s.get("err")]
-        wanted = [s["signature"] for s in ok[: self.cfg.max_wallet_txs]]
+        wanted = [s["signature"] for s in ok[:limit]]
         if complete:
             wanted += [s["signature"] for s in ok[-5:]]  # the oldest txs reveal the funder
         txs = await self.fetch_parsed(wanted)

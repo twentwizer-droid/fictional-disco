@@ -79,6 +79,13 @@ CREATE TABLE IF NOT EXISTS wallets (
 );
 CREATE INDEX IF NOT EXISTS wallets_funder ON wallets(funder);
 
+-- your own watchlist of trader wallets (signals)
+CREATE TABLE IF NOT EXISTS traders (
+    address TEXT PRIMARY KEY,
+    label TEXT,
+    added_at REAL
+);
+
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mint TEXT NOT NULL,
@@ -317,6 +324,24 @@ class Store:
     def funders(self) -> dict[str, str]:
         rows = self.db.execute("SELECT address, funder FROM wallets WHERE funder IS NOT NULL").fetchall()
         return {r["address"]: r["funder"] for r in rows}
+
+    # -- traders watchlist -----------------------------------------------------
+
+    def add_trader(self, address: str, label: str = "") -> None:
+        self.db.execute(
+            "INSERT INTO traders(address, label, added_at) VALUES (?,?,?) "
+            "ON CONFLICT(address) DO UPDATE SET label = COALESCE(NULLIF(excluded.label, ''), traders.label)",
+            (address, label, time.time()),
+        )
+        self.db.commit()
+
+    def remove_trader(self, address: str) -> bool:
+        cur = self.db.execute("DELETE FROM traders WHERE address = ?", (address,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def traders(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self.db.execute("SELECT * FROM traders ORDER BY added_at")]
 
     # -- bot positions ---------------------------------------------------------
 

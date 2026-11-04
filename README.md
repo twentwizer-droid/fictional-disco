@@ -79,7 +79,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,ai]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 62 offline tests
+pytest                      # 68 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -311,6 +311,20 @@ Access control:
 Token names and links are written by whoever launched the token. The Telegram bot escapes
 them, and the page inserts them as text only under a strict Content-Security-Policy.
 
+### Signal bot: your traders + bundles
+
+Add trader wallets you found (`/addtrader <wallet> [label]` in Telegram, or `bh trader add`).
+Each one's history is loaded and its real PnL per token computed (`/traders`, `/trader <wallet>`,
+web tab «Трейдери»). Their trades are streamed live with the cluster wallets.
+
+Signals sent to Telegram (signals only, no orders):
+- a trader buys (at least `min_trader_buy_sol`);
+- several of your traders buy the same token within `confluence_window_s`;
+- a trader sells a token that had a buy signal;
+- a bundle group in the black launches or buys a token (with which of your traders are already in).
+
+Each signal is followed by the token's bundle panel, dev group and LARP check. Settings are in `[signals]`.
+
 ## Run it 24/7 ("upload once, it runs by itself")
 
 ```bash
@@ -387,6 +401,7 @@ All parameters are in `config.example.toml`.
 | `telegram.py` | Telegram bot (Bot API long polling, allow-list, phone-friendly reports) |
 | `web.py`, `webui/` | web panel: aiohttp JSON API + one static page (Ukrainian UI) |
 | `i18n.py` | Ukrainian wording for strategy reasons and verdicts |
+| `traders.py` | trader watchlist stats (real PnL per token) and the signal engine |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |
 | `execution.py` | `PaperBroker`, `LiveBroker` (PumpPortal tx + local signing + Jito bundle + RPC fallback) |

@@ -15,6 +15,7 @@
     <button data-tab="check">Перевірка токена</button>
     <button data-tab="narrative">Наратив</button>
     <button data-tab="clusters">Групи бандлерів</button>
+    <button data-tab="traders">Трейдери</button>
     <button data-tab="positions">Угоди</button>
   </nav>
 </header>
@@ -50,6 +51,12 @@
     <label class="toggle"><input type="checkbox" id="clusters-all"> показати всі групи, а не лише «в плюсі»</label>
     <div id="clusters-table"></div>
     <div id="cluster-detail"></div>
+  </section>
+
+  <section id="traders" class="tab">
+    <p class="muted">Додавай трейдерів у Telegram: /addtrader &lt;гаманець&gt; [назва]. Бот надсилає сигнал на кожну їхню купівлю.</p>
+    <div id="traders-table"></div>
+    <div id="trader-detail"></div>
   </section>
 
   <section id="positions" class="tab">

@@ -103,6 +103,9 @@ def create_app(service: Service, password: str | None = None) -> web.Application
         res = await service.narrative_search(request.query.get("q", ""))
         return _json(res.to_dict())
 
+    async def traders(request: web.Request) -> web.Response:
+        return _json([t.to_dict() for t in service.traders()])
+
     async def positions(request: web.Request) -> web.Response:
         return _json(service.positions())
 
@@ -116,6 +119,7 @@ def create_app(service: Service, password: str | None = None) -> web.Application
         web.get("/api/check/{mint}", check),
         web.get("/api/narrative", narrative),
         web.get("/api/positions", positions),
+        web.get("/api/traders", traders),
     ])
     return app
 

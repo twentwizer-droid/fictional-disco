@@ -24,6 +24,7 @@ from .models import MarketEvent
 from .narrative import Member, NarrativeAnalyzer, Query, family_to_dict, parse_query
 from .rpc import SolanaRpc
 from .storage import Store
+from .traders import SignalEngine, TraderStats
 
 if TYPE_CHECKING:
     from .runner import BotRunner
@@ -95,8 +96,12 @@ class Service:
         self._index: tuple[float, ClusterIndex] | None = None
         self.watches: dict[str, NarrativeWatch] = {}
         self._tasks: set[asyncio.Task] = set()
+        self.signals = SignalEngine(cfg, store, self)  # .send is set by the Telegram bot
         if runner is not None:
             runner.create_listeners.append(self._on_create)
+            runner.trade_listeners.append(self.signals.on_trade)
+            runner.watch_listeners.append(self.signals.on_bundle_watch)
+            runner.extra_accounts |= set(self.signals.traders)
 
     async def close(self) -> None:
         await self.narrative.close()
@@ -123,7 +128,7 @@ class Service:
     def valid_mint(mint: str) -> str:
         mint = mint.strip()
         if not SOL_ADDRESS.fullmatch(mint):
-            raise ValueError("це не схоже на адресу токена Solana")
+            raise ValueError("це не схоже на адресу Solana")
         return mint
 
     # -- requests --------------------------------------------------------------------
@@ -203,6 +208,8 @@ class Service:
             "positions_closed": sum(1 for r in rows if r["closed_at"]),
             "realized_pnl_sol": realized,
             "narrative_watches": [w.query.raw for w in self.watches.values()],
+            "traders": len(self.signals.traders),
+            "signals_sent": self.signals.sent,
             "watching": [],
             "tracked_wallets": 0,
         }
@@ -223,6 +230,41 @@ class Service:
                 for w in strat.watches.values()
             ]
         return out
+
+    # -- your traders ---------------------------------------------------------------
+
+    async def add_trader(self, address: str, label: str = "") -> TraderStats:
+        """Add to the watchlist, start streaming its trades, load its history for PnL stats."""
+        address = self.valid_mint(address)  # same base58 shape as a mint
+        self.store.add_trader(address, label.strip()[:40])
+        self.signals.load()
+        if self.runner is not None:
+            self.runner.extra_accounts.add(address)
+            await self.runner.refresh_accounts()
+        async with self._sem:
+            await self.analyzer.profile_wallet(address, max_txs=self.cfg.signals.trader_history_txs)
+        return self.signals.stats(address, max_age_s=0)
+
+    async def remove_trader(self, address: str) -> bool:
+        ok = self.store.remove_trader(address.strip())
+        self.signals.load()
+        if self.runner is not None:
+            self.runner.extra_accounts.discard(address.strip())
+            await self.runner.refresh_accounts()
+        return ok
+
+    def traders(self) -> list[TraderStats]:
+        rows = [self.signals.stats(t["address"]) for t in self.store.traders()]
+        return sorted(rows, key=lambda t: t.realized_pnl, reverse=True)
+
+    async def trader(self, address: str) -> TraderStats:
+        address = self.valid_mint(address)
+        if not self.store.wallet(address):
+            async with self._sem:
+                await self.analyzer.profile_wallet(address, max_txs=self.cfg.signals.trader_history_txs)
+        st = self.signals.stats(address, max_age_s=0)
+        st.label = st.label or next((t["label"] for t in self.store.traders() if t["address"] == address), "") or ""
+        return st
 
     # -- live narrative watches (fed by the runner's create events) ------------------
 

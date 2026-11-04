@@ -60,6 +60,9 @@ class BotRunner:
         self._meta_pending = 0
         self.notify: Callable[[str], Awaitable[None]] | None = None  # e.g. Telegram: trades, watches
         self.create_listeners: list[Callable[[MarketEvent], None]] = []  # e.g. narrative watches
+        self.trade_listeners: list[Callable[[MarketEvent], None]] = []  # e.g. trader signals
+        self.watch_listeners: list[Callable[[str, str], None]] = []  # (mint, cluster_id): bundle signals
+        self.extra_accounts: set[str] = set()  # wallets to stream besides the clusters (your traders)
         self.started_at = time.time()
         self.strategy = Strategy(cfg.strategy, {}, set())
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
@@ -75,11 +78,14 @@ class BotRunner:
         index = build_clusters(self.store, self.cfg.clusters)
         black = index.black(self.cfg.selection)
         self.strategy.update_clusters(index.wallet_to_cluster, {c.cluster_id for c in black})
-        await self.feed.set_accounts(self.strategy.tracked_wallets())
+        await self.refresh_accounts()
         log.info(
             "clusters: %d total, %d in the black, tracking %d wallets",
             len(index.clusters), len(black), len(self.strategy.tracked_wallets()),
         )
+
+    async def refresh_accounts(self) -> None:
+        await self.feed.set_accounts(set(self.strategy.tracked_wallets()) | self.extra_accounts)
 
     async def run(self) -> None:
         await self.rebuild()
@@ -122,6 +128,12 @@ class BotRunner:
                     self._spawn(self._record_metadata(ev.mint, ev.uri))
                 if self.cfg.feed.funder_lookup_on_create and ev.wallet not in self.strategy.wallet_to_cluster:
                     self._spawn(self._funder_lookup(ev))
+            else:
+                for listener in self.trade_listeners:
+                    try:
+                        listener(ev)
+                    except Exception:
+                        log.exception("trade listener failed")
             self._handle(ev)
 
     def _token_name(self, mint: str) -> str:
@@ -154,6 +166,12 @@ class BotRunner:
             self._spawn(self.feed.subscribe_tokens(new))
             for mint in new:
                 self._spawn(self._check_token(mint))
+                w = self.strategy.watches.get(mint)
+                for listener in self.watch_listeners:
+                    try:
+                        listener(mint, w.cluster_id if w else "")
+                    except Exception:
+                        log.exception("watch listener failed")
         done = self.strategy.drain_finished()
         if done:
             self._spawn(self.feed.unsubscribe_tokens(done))

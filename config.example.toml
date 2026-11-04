@@ -91,6 +91,15 @@ dexscreener = true         # search DexScreener too, not only your recorded laun
 max_analyze = 10           # tokens analyzed in depth per query
 watch_delay_s = 20         # --watch: let the bundle land before analyzing
 
+[signals]                  # signal bot: your traders (/addtrader) + bundle groups in the black
+trader_buys = true
+trader_sells = true        # only for tokens a buy signal was sent for
+min_trader_buy_sol = 0.2
+confluence_window_s = 1800 # several of your traders in one token within 30 min = stronger signal
+analyze = true             # follow-up with bundle panel + LARP check
+bundle_signals = true
+trader_history_txs = 400   # history loaded when you add a trader (for PnL)
+
 [telegram]                 # token / allowed ids are in .env
 notify_trades = true       # message on every buy and sell
 

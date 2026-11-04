@@ -220,3 +220,24 @@ def test_ukrainian_wording():
     assert ua_reason("something new") == "something new"
     f = Finding("red", "x", "english", "українською")
     assert f.text_ua == "українською" and Finding("red", "x", "only english").text_ua == "only english"
+
+
+def test_telegram_trader_commands():
+    from bundlehunter.traders import TraderStats
+
+    svc = _service()
+    added = []
+
+    async def add_trader(wallet, label=""):
+        added.append((wallet, label))
+        return TraderStats(wallet, label)
+
+    svc.add_trader = add_trader
+    bot, sent = _bot(svc)
+    w = _addr()
+    asyncio.run(bot.handle({"chat": {"id": 42}, "from": {"id": 42}, "text": f"/addtrader {w} Alpha"}))
+    asyncio.run(bot.handle({"chat": {"id": 42}, "from": {"id": 42}, "text": "/traders"}))
+    assert added == [(w, "Alpha")]
+    assert "Трейдера додано" in sent.messages[1][1] and "мало даних" in sent.messages[1][1]
+    assert "Трейдерів ще немає" in sent.messages[2][1]  # fake add didn't store it
+    assert svc.signals.send == bot.notify_html  # signals go out through the bot

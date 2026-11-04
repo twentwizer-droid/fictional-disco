@@ -131,3 +131,20 @@ def test_example_config_is_valid(monkeypatch):
     monkeypatch.chdir(root)
     cfg = load_config(root / "config.example.toml")
     assert cfg.strategy.mode == "dip" and cfg.analyzer.min_create_slot_txs == 3
+
+
+def test_runner_streams_trader_wallets_and_forwards_their_trades():
+    store = Store(":memory:")
+    feed = FakeFeed([ev("buy", "trader1", 1e-8, 1), ev("buy", "random", 1e-8, 2)])
+    cfg = Config()
+    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed, scanner=FakeScanner(), larp=FakeLarp())
+    runner.extra_accounts.add("trader1")
+    seen = []
+    runner.trade_listeners.append(lambda e: seen.append(e.wallet))
+
+    async def go():
+        await runner.rebuild()
+        await runner._consume()
+
+    asyncio.run(go())
+    assert "trader1" in feed.accounts and seen == ["trader1", "random"]  # the engine filters by watchlist

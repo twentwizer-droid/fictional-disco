@@ -112,6 +112,7 @@ loaders.overview = async function () {
       card("Стежу за гаманцями", s.tracked_wallets),
       card("PnL paper, SOL", signed(s.realized_pnl_sol.paper, 3), pnlClass(s.realized_pnl_sol.paper)),
       card("PnL live, SOL", signed(s.realized_pnl_sol.live, 3), pnlClass(s.realized_pnl_sol.live)),
+      card("Трейдерів / сигналів", `${s.traders ?? 0} / ${s.signals_sent ?? 0}`),
       card("Працює", `${(s.uptime_s / 3600).toFixed(1)} год`),
     );
     $("watching").replaceChildren(table(
@@ -281,6 +282,39 @@ async function showCluster(id) {
   } catch (err) {
     fail(box, err);
   }
+}
+
+// -- traders ---------------------------------------------------------------------------
+
+const VERDICT_LVL = { "в плюсі": "green", "в мінусі": "red", "мало даних": "info" };
+
+loaders.traders = async function () {
+  const box = $("traders-table");
+  busy(box, "Завантажую трейдерів…");
+  try {
+    const rows = await api("/api/traders");
+    box.replaceChildren(table(
+      ["Трейдер", "Гаманець", "Висновок", { label: "PnL, SOL", num: true }, { label: "В плюс", num: true },
+        { label: "Угод", num: true }, { label: "Сер. вхід", num: true }, "Остання угода"],
+      rows.map((t) => ({
+        attrs: { class: "clickable", onclick: () => showTrader(t) },
+        cells: [t.label || short(t.address), mint(t.address), tag(t.verdict, VERDICT_LVL[t.verdict] || "info"),
+          el("span", { class: pnlClass(t.realized_pnl_sol) }, signed(t.realized_pnl_sol, 2)), pct(t.win_rate, 0),
+          t.closed, (t.avg_buy_sol || 0).toFixed(2), ago(t.last_trade)],
+      })),
+    ));
+  } catch (err) {
+    fail(box, err);
+  }
+};
+
+function showTrader(t) {
+  $("trader-detail").replaceChildren(el("div", { class: "box" },
+    el("h3", {}, `${t.label || short(t.address)}: останні токени`),
+    table(["Купив", "Mint", { label: "Вклав", num: true }, { label: "Вивів", num: true }, { label: "PnL", num: true }, "Стан"],
+      t.recent.map((r) => ({ cells: [ago(r.first_buy), mint(r.mint), r.sol_in.toFixed(3), r.sol_out.toFixed(3),
+        el("span", { class: pnlClass(r.pnl) }, signed(r.pnl, 3)), r.closed ? "закрито" : "ще тримає"] }))),
+  ));
 }
 
 // -- positions -------------------------------------------------------------------------

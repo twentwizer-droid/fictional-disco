@@ -152,6 +152,19 @@ class NarrativeConfig:
 
 
 @dataclass
+class SignalsConfig:
+    """Signal bot: your trader wallets + bundle groups in the black -> Telegram."""
+
+    trader_buys: bool = True
+    trader_sells: bool = True  # only for tokens we signalled a buy for
+    min_trader_buy_sol: float = 0.2  # smaller buys are noise
+    confluence_window_s: float = 1800.0  # several traders in the same token within 30 min = stronger signal
+    analyze: bool = True  # follow-up message with bundle panel + LARP check
+    bundle_signals: bool = True  # profitable bundle group launched / bought a token
+    trader_history_txs: int = 400  # txs fetched when you add a trader (for PnL stats)
+
+
+@dataclass
 class TelegramConfig:
     """Telegram bot (bh serve). Token and allowed chat ids come from .env: BH_TELEGRAM_TOKEN,
     BH_TELEGRAM_ALLOWED_IDS. Without allowed ids the bot answers nobody but tells you your id."""
@@ -188,6 +201,7 @@ class Config:
     feed: FeedConfig = field(default_factory=FeedConfig)
     larp: LarpConfig = field(default_factory=LarpConfig)
     narrative: NarrativeConfig = field(default_factory=NarrativeConfig)
+    signals: SignalsConfig = field(default_factory=SignalsConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     web: WebConfig = field(default_factory=WebConfig)
     auto: AutoConfig = field(default_factory=AutoConfig)
