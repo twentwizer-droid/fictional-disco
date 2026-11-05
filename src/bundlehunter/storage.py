@@ -145,6 +145,7 @@ class Store:
         # token metadata for the LARP check; links are stored normalized (see larp.norm_link)
         "tokens": {c: "TEXT" for c in ("uri", "description", "image", "twitter", "telegram", "website")}
         | {"meta_at": "REAL"},
+        "positions": {"strategy": "TEXT NOT NULL DEFAULT 'bundle'"},
     }
     _LINK_COLUMNS = ("uri", "image", "twitter", "telegram", "website")
 

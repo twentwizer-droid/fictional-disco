@@ -79,7 +79,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,ai]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 72 offline tests
+pytest                      # 80 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -333,6 +333,24 @@ Bulk import: send an Axiom / GMGN wallet-tracker export to the Telegram bot, or 
 - Wallets sharing a name count as one person in signals.
 - `--seed-bundles N` analyzes the launches of named bundle groups (`walletsort.py`).
 
+### Scalping strategy (`[scalp]`)
+
+A second strategy runs next to the bundle copier. It takes a 20-60% slice of moves that your ranked
+traders start. Each scalping rule is a check in `scalp.py`:
+
+- **Reason:** one trader with score >= 80, or two different people with score >= 60.
+- **Confirmation:** buy volume, buy/sell pressure and unique buyers in the last minute.
+- **No chasing:** no entry more than +50% above the smart entry, and none into a +25% / 15 s candle.
+- **Plan fixed at entry:** take profit scaled by size, stop, trailing stop and max hold time,
+  stored with the trade.
+- **Exit when the idea dies:** sells outweigh buys, or the smart wallets sell.
+- **No revenge trading:** cooldown after a loss, a pause after a losing streak, a daily loss
+  limit and a cap on trades per hour.
+- **Skipped setups** are recorded with the reason (dashboard / `/scalp`).
+
+Trader scores come from `traders.py`: win rate, profit factor, PnL and sample size, plus style
+(bot / scalper / intraday / holder), average win and loss, ROI and trades per day.
+
 ## Run it 24/7 ("upload once, it runs by itself")
 
 ```bash
@@ -410,6 +428,7 @@ All parameters are in `config.example.toml`.
 | `web.py`, `webui/` | web panel: aiohttp JSON API + one static page (Ukrainian UI) |
 | `i18n.py` | Ukrainian wording for strategy reasons and verdicts |
 | `walletsort.py` | sort / dedupe / categorize wallet-tracker exports (Axiom JSON in any encoding, TSV) |
+| `scalp.py` | scalping strategy (reason → confirmation → plan → exit → no revenge) |
 | `traders.py` | trader watchlist stats (real PnL per token) and the signal engine |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |

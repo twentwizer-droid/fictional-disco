@@ -210,6 +210,7 @@ class Service:
             "realized_pnl_sol": realized,
             "narrative_watches": [w.query.raw for w in self.watches.values()],
             "traders": len(self.signals.traders),
+            "scalp": None,
             "signals_sent": self.signals.sent,
             "watching": [],
             "tracked_wallets": 0,
@@ -218,6 +219,7 @@ class Service:
             strat = self.runner.strategy
             out["mode"] = "live" if self.runner.broker.live else "paper"
             out["tracked_wallets"] = len(strat.tracked_wallets())
+            out["scalp"] = self.runner.scalper.status(time.time()) if self.runner.scalper else None
             out["watching"] = [
                 {
                     "mint": w.mint,
@@ -285,7 +287,7 @@ class Service:
 
     def traders(self) -> list[TraderStats]:
         rows = [self.signals.stats(t["address"]) for t in self.store.traders()]
-        return sorted(rows, key=lambda t: t.realized_pnl, reverse=True)
+        return sorted(rows, key=lambda t: (t.score is None, -(t.score or 0), -t.realized_pnl))
 
     async def trader(self, address: str) -> TraderStats:
         address = self.valid_mint(address)

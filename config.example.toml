@@ -91,6 +91,38 @@ dexscreener = true         # search DexScreener too, not only your recorded laun
 max_analyze = 10           # tokens analyzed in depth per query
 watch_delay_s = 20         # --watch: let the bundle land before analyzing
 
+[scalp]                    # scalping: a 20-60% slice of a move your ranked traders start
+enabled = true
+buy_sol = 0.1
+max_open_positions = 2
+min_trader_score = 60      # "smart" wallet = your trader with score >= 60 (bh trader rank / /rank)
+strong_trader_score = 80   # one such wallet is reason enough, otherwise...
+min_smart_wallets = 2      # ...at least 2 different smart people
+entry_window_s = 300       # not confirmed in 5 min -> skip
+momentum_window_s = 60
+min_buy_volume_sol = 3.0
+min_buy_pressure = 1.5     # buys / sells in the window
+min_unique_buyers = 5
+max_chase_pct = 0.5        # never more than +50% above the smart wallets' entry
+max_spike_pct = 0.25       # no entry into a +25% candle (spike_window_s)
+spike_window_s = 15
+max_larp_score = 60
+max_bundlers_pct = 0.30
+max_insiders_pct = 0.20
+take_profit_max_pct = 0.6  # small position
+take_profit_min_pct = 0.2  # position >= size_for_min_tp_sol
+size_for_min_tp_sol = 2.0
+stop_loss_pct = 0.15
+trailing_pct = 0.10        # after half the take profit
+max_hold_s = 600
+exit_sell_pressure = 1.5   # sells outweigh buys -> the idea is over
+exit_on_smart_sell = true
+cooldown_after_loss_s = 600
+max_consecutive_losses = 3
+pause_after_streak_s = 3600
+daily_loss_limit_sol = 0.5
+max_trades_per_hour = 6
+
 [signals]                  # signal bot: your traders (/addtrader) + bundle groups in the black
 trader_buys = true
 trader_sells = true        # only for tokens a buy signal was sent for

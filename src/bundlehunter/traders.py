@@ -90,6 +90,73 @@ class TraderStats:
     def avg_buy_sol(self) -> float:
         return statistics.mean(t.sol_in for t in self.tokens) if self.tokens else 0.0
 
+    # -- deep metrics ---------------------------------------------------------------------
+
+    @property
+    def rois(self) -> list[float]:
+        return [t.pnl / t.sol_in for t in self.closed if t.sol_in > 0]
+
+    @property
+    def avg_roi(self) -> float | None:
+        return statistics.mean(self.rois) if self.rois else None
+
+    @property
+    def profit_factor(self) -> float | None:
+        """Sum of wins / sum of losses: above 1.5 is a real edge, below 1 loses money."""
+        wins = sum(t.pnl for t in self.closed if t.pnl > 0)
+        losses = -sum(t.pnl for t in self.closed if t.pnl < 0)
+        if not self.closed:
+            return None
+        return min(wins / losses, 99.0) if losses > 0 else (99.0 if wins > 0 else 0.0)
+
+    @property
+    def avg_win_sol(self) -> float:
+        w = [t.pnl for t in self.closed if t.pnl > 0]
+        return statistics.mean(w) if w else 0.0
+
+    @property
+    def avg_loss_sol(self) -> float:
+        lo = [t.pnl for t in self.closed if t.pnl < 0]
+        return statistics.mean(lo) if lo else 0.0
+
+    @property
+    def best(self) -> TokenResult | None:
+        return max(self.closed, key=lambda t: t.pnl, default=None)
+
+    @property
+    def worst(self) -> TokenResult | None:
+        return min(self.closed, key=lambda t: t.pnl, default=None)
+
+    @property
+    def trades_per_day(self) -> float:
+        times = [t.first_buy for t in self.tokens if t.first_buy]
+        if len(times) < 2:
+            return float(len(times))
+        days = max((max(times) - min(times)) / 86400, 1.0)
+        return len(times) / days
+
+    @property
+    def style(self) -> str:
+        h = self.median_hold_s
+        if h is None:
+            return "невідомо"
+        if h < 60:
+            return "бот / снайпер"  # out in under a minute: impossible to follow
+        if h < 600:
+            return "скальпер"
+        if h < 6 * 3600:
+            return "інтрадей"
+        return "холдер"
+
+    @property
+    def score(self) -> float | None:
+        """0-100: win rate 40%, profit factor 30%, realized PnL 20%, sample size 10%. None under 5 closed trades."""
+        if len(self.closed) < 5:
+            return None
+        pf = self.profit_factor or 0.0
+        return round(100 * (0.4 * self.win_rate + 0.3 * min(pf, 3.0) / 3.0
+                            + 0.2 * min(max(self.realized_pnl, 0.0) / 50.0, 1.0) + 0.1 * min(len(self.closed) / 30, 1.0)), 1)
+
     @property
     def verdict(self) -> str:
         if len(self.closed) < 5:
@@ -104,8 +171,9 @@ class TraderStats:
         """One-line summary for signals."""
         if not self.closed:
             return "історії ще немає"
-        return (f"PnL {self.realized_pnl:+.1f} SOL · {self.win_rate:.0%} в плюс · "
-                f"{len(self.closed)} закритих угод · {self.verdict}")
+        score = f"score {self.score:.0f} · " if self.score is not None else ""
+        return (f"{score}PnL {self.realized_pnl:+.1f} SOL · {self.win_rate:.0%} в плюс · "
+                f"{len(self.closed)} угод · {self.style}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +181,11 @@ class TraderStats:
             "realized_pnl_sol": round(self.realized_pnl, 4), "win_rate": round(self.win_rate, 3),
             "tokens": len(self.tokens), "closed": len(self.closed), "median_hold_s": self.median_hold_s,
             "avg_buy_sol": round(self.avg_buy_sol, 4), "last_trade": self.last_trade,
+            "score": self.score, "style": self.style, "profit_factor": self.profit_factor,
+            "avg_roi": self.avg_roi, "avg_win_sol": round(self.avg_win_sol, 4), "avg_loss_sol": round(self.avg_loss_sol, 4),
+            "best": {"mint": self.best.mint, "pnl": round(self.best.pnl, 4)} if self.best else None,
+            "worst": {"mint": self.worst.mint, "pnl": round(self.worst.pnl, 4)} if self.worst else None,
+            "trades_per_day": round(self.trades_per_day, 2),
             "recent": [
                 {"mint": t.mint, "sol_in": round(t.sol_in, 4), "sol_out": round(t.sol_out, 4), "pnl": round(t.pnl, 4),
                  "closed": t.closed, "first_buy": t.first_buy}

@@ -37,6 +37,12 @@ def test_trader_stats():
     assert abs(st.realized_pnl - (5 * 1.0 - 0.5)) < 1e-9 and abs(st.win_rate - 5 / 6) < 1e-9
     assert st.median_hold_s == 600 and st.verdict == "в плюсі"
     assert "PnL +4.5 SOL" in st.line() and st.to_dict()["recent"][0]["mint"] == "M_open"
+    # deep metrics: 5 wins of +1.0, one loss of -0.5, held 10 minutes
+    assert st.profit_factor == 10.0 and abs(st.avg_roi - (5 * 1.0 - 0.5) / 6) < 1e-9
+    assert st.avg_win_sol == 1.0 and st.avg_loss_sol == -0.5 and st.worst.mint == "M5"
+    assert st.style == "інтрадей"  # 600 s median hold
+    # 0.4*5/6 + 0.3*1 + 0.2*4.5/50 + 0.1*6/30 = 0.6713...
+    assert st.score == 67.1 and st.to_dict()["score"] == 67.1
 
 
 class FakeService:
@@ -88,7 +94,7 @@ def test_signals_buy_confluence_sell_and_filters():
     asyncio.run(go())
     buys = [m for m in out if "купив" in m or "в одному токені" in m]
     assert len(buys) == 2
-    assert "Трейдер купив" in buys[0] and "Alpha" in buys[0] and "&lt;CAT&gt;" in buys[0] and "в плюсі" in buys[0]
+    assert "Трейдер купив" in buys[0] and "Alpha" in buys[0] and "&lt;CAT&gt;" in buys[0] and "score 67" in buys[0]
     assert "2 твоїх трейдери в одному токені" in buys[1] and "Також купили" in buys[1] and "Alpha" in buys[1]
     assert sum("Трейдер продає" in m for m in out) == 1
     analyses = [m for m in out if m.startswith("🔎")]

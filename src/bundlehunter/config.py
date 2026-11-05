@@ -152,6 +152,48 @@ class NarrativeConfig:
 
 
 @dataclass
+class ScalpConfig:
+    """Scalping: take 20-60% of a move that strong wallets started and volume confirms."""
+
+    enabled: bool = True
+    buy_sol: float = 0.1
+    max_open_positions: int = 2
+    # 1. a reason to enter: your traders (bh trader rank gives them a score)
+    min_trader_score: float = 60.0  # a "smart" wallet = one of your traders scoring >= 60
+    strong_trader_score: float = 80.0  # one wallet this strong is reason enough...
+    min_smart_wallets: int = 2  # ...otherwise at least 2 different smart people
+    min_smart_buy_sol: float = 0.2
+    entry_window_s: float = 300.0  # no confirmation within 5 min -> skip (a missed trade costs 0)
+    # 2. confirmation, not a blind chase
+    momentum_window_s: float = 60.0
+    min_buy_volume_sol: float = 3.0
+    min_buy_pressure: float = 1.5  # buy SOL / sell SOL in the window
+    min_unique_buyers: int = 5
+    max_chase_pct: float = 0.5  # never pay more than +50% above the first smart buy
+    max_spike_pct: float = 0.25  # no entry into a vertical candle: +25% within spike_window_s
+    spike_window_s: float = 15.0
+    max_larp_score: int = 60
+    max_bundlers_pct: float = 0.30
+    max_insiders_pct: float = 0.20
+    # 3. the plan, fixed before entry
+    take_profit_max_pct: float = 0.6  # small position
+    take_profit_min_pct: float = 0.2  # large position (harder to exit)
+    size_for_min_tp_sol: float = 2.0
+    stop_loss_pct: float = 0.15
+    trailing_pct: float = 0.10  # once half of the take profit is reached
+    max_hold_s: float = 600.0
+    # 4. leave when the idea stops working
+    exit_sell_pressure: float = 1.5  # sells outweigh buys 1.5x in the window
+    exit_on_smart_sell: bool = True
+    # 5. no revenge trading
+    cooldown_after_loss_s: float = 600.0
+    max_consecutive_losses: int = 3
+    pause_after_streak_s: float = 3600.0
+    daily_loss_limit_sol: float = 0.5
+    max_trades_per_hour: int = 6
+
+
+@dataclass
 class SignalsConfig:
     """Signal bot: your trader wallets + bundle groups in the black -> Telegram."""
 
@@ -201,6 +243,7 @@ class Config:
     feed: FeedConfig = field(default_factory=FeedConfig)
     larp: LarpConfig = field(default_factory=LarpConfig)
     narrative: NarrativeConfig = field(default_factory=NarrativeConfig)
+    scalp: ScalpConfig = field(default_factory=ScalpConfig)
     signals: SignalsConfig = field(default_factory=SignalsConfig)
     telegram: TelegramConfig = field(default_factory=TelegramConfig)
     web: WebConfig = field(default_factory=WebConfig)

@@ -42,6 +42,7 @@ class Action:
     cluster_id: str
     sol_amount: float = 0.0  # buys
     token_amount: float = 0.0  # sells
+    strategy: str = "bundle"  # which strategy gets the fill
 
 
 @dataclass

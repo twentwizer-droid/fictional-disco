@@ -54,6 +54,8 @@ HELP = """<b>bundlehunter</b> 🤖
 <b>Надішли файл</b> (експорт гаманців з Axiom / GMGN, .txt чи .json) — бот відсортує й додасть трейдерів
 <b>/rank</b> [скільки] — завантажити історію і відсортувати трейдерів за реальним PnL
 
+<b>/scalp</b> — скальпінг: стан, що чекає підтвердження, які угоди пропущено і чому
+
 Можна просто надіслати адресу токена або слова наратива."""
 
 
@@ -207,6 +209,9 @@ def fmt_trader(st: TraderStats) -> str:
         f"👤 <b>{e(st.name)}</b> <code>{e(st.address)}</code>",
         f"{icon} <b>{e(st.verdict)}</b> · PnL {st.realized_pnl:+.2f} SOL · {st.win_rate:.0%} в плюс",
         f"Токенів {len(st.tokens)}, закрито {len(st.closed)} · середній вхід {st.avg_buy_sol:.2f} SOL · тримає ~{hold}",
+        f"Score <b>{st.score:.0f}</b>/100 · {e(st.style)}" if st.score is not None else f"Score: мало даних · {e(st.style)}",
+        f"Сер. виграш {st.avg_win_sol:+.3f} · сер. програш {st.avg_loss_sol:+.3f} SOL · profit factor "
+        + (f"{st.profit_factor:.2f}" if st.profit_factor is not None else "–") + f" · {st.trades_per_day:.1f} угод/день",
     ]
     recent = sorted(st.tokens, key=lambda t: t.first_buy or 0, reverse=True)[:8]
     if recent:
@@ -227,6 +232,26 @@ def fmt_traders(rows: list[TraderStats]) -> str:
                      f"{st.win_rate:.0%} · {len(st.closed)} угод")
     if len(rows) > 40:
         lines.append(f"… і ще {len(rows) - 40}. Повний список: веб-панель, вкладка «Трейдери».")
+    return "\n".join(lines)
+
+
+def fmt_scalp(sc: dict[str, Any] | None) -> str:
+    if not sc:
+        return "Скальпінг вимкнено або бот не запущено."
+    wr = f"{sc['win_rate']:.0%}" if sc["win_rate"] is not None else "–"
+    lines = [
+        "<b>Скальпінг</b>",
+        f"Стан: {e(sc['state'])}",
+        f"PnL сьогодні {sc['today_pnl_sol']:+.4f} SOL · угод {sc['trades']} · в плюс {wr} · збитків поспіль {sc['loss_streak']}",
+    ]
+    if sc["watching"]:
+        lines += ["", "<b>Чекаю підтвердження</b>"]
+        for w in sc["watching"][:10]:
+            state = "у позиції" if w["in_position"] else e(w["blocked"] or "перевіряю")
+            lines.append(f"<code>{e(_short(w['mint']))}</code> · {e(', '.join(w['smart']))} · {state}")
+    if sc["skipped"]:
+        lines += ["", "<b>Пропущені (0 $ збитку)</b>"]
+        lines += [f"<code>{e(_short(x['mint']))}</code> · {e(x['why'])}" for x in sc["skipped"][-5:]]
     return "\n".join(lines)
 
 
@@ -408,6 +433,8 @@ class TelegramBot:
                 raise ValueError("додай гаманець: /trader <гаманець>")
             await self.send(chat_id, "⏳ Рахую PnL гаманця…")
             await self.send(chat_id, fmt_trader(await self.service.trader(arg)))
+        elif cmd == "/scalp":
+            await self.send(chat_id, fmt_scalp(self.service.status().get("scalp")))
         elif cmd == "/positions":
             await self.send(chat_id, fmt_positions(self.service.positions()))
         elif cmd == "/status":

@@ -148,3 +148,50 @@ def test_runner_streams_trader_wallets_and_forwards_their_trades():
 
     asyncio.run(go())
     assert "trader1" in feed.accounts and seen == ["trader1", "random"]  # the engine filters by watchlist
+
+
+def test_runner_scalps_on_paper_end_to_end():
+    from factory import trade
+
+    from bundlehunter.models import ParsedTx
+
+    store = Store(":memory:")
+    store.add_trader("smartguy", "Alpha")
+    hist = []
+    for i in range(10):  # 10 winning, closed trades -> high score
+        hist += [trade(f"hb{i}", f"H{i}", "smartguy", "buy", 1.0, 1e6, i, T0 - 9000 + i * 600),
+                 trade(f"hs{i}", f"H{i}", "smartguy", "sell", 2.0, 1e6, i, T0 - 9000 + i * 600 + 300)]
+    store.add_parsed([ParsedTx("x", 0, None, False, "", [], trades=hist)])
+
+    def e(kind, wallet, price, i, sol=0.8):
+        return MarketEvent(kind, MINT, wallet, T0 + i, sol, sol / price, price, f"s{i}{wallet}")
+
+    events = [e("buy", "smartguy", 1e-6, 0, 1.0)]
+    events += [e("buy", f"r{i}", 1e-6 * (1 + 0.01 * i), 1 + i) for i in range(6)]  # volume confirms
+    events += [e("buy", "late", 1.7e-6, 20, 0.2)]  # +70%: take profit
+    feed = FakeFeed(events)
+    cfg = Config()
+    cfg.strategy.panel_delay_s = 0
+    cfg.scalp.strong_trader_score = 70
+    larp = FakeLarp()
+    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed, scanner=FakeScanner(), larp=larp)
+    said = []
+
+    async def notify(text):
+        said.append(text)
+
+    runner.notify = notify
+
+    async def go():
+        await runner.rebuild()
+        assert "smartguy" in feed.accounts
+        await runner._consume()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+
+    asyncio.run(go())
+    (pos,) = store.positions()
+    assert pos["strategy"] == "scalp" and pos["closed_at"] and pos["pnl_sol"] > 0
+    assert "Alpha" in pos["reason_open"] and "план: TP +" in pos["reason_open"]
+    assert pos["reason_close"].startswith("тейк-профіт")
+    assert any("скальп" in t and "план:" in t for t in said) and any("ПРОДАЖ" in t for t in said)

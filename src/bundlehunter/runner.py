@@ -31,7 +31,9 @@ from .models import MarketEvent
 from .parser import parse_transaction
 from .rpc import SolanaRpc
 from .storage import Store
+from .scalp import ScalpStrategy
 from .strategy import Action, Strategy
+from .traders import short, trader_stats
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +66,8 @@ class BotRunner:
         self.watch_listeners: list[Callable[[str, str], None]] = []  # (mint, cluster_id): bundle signals
         self.extra_accounts: set[str] = set()  # wallets to stream besides the clusters (your traders)
         self.started_at = time.time()
-        self.strategy = Strategy(cfg.strategy, {}, set())
+        self.strategy = Strategy(cfg.strategy, {}, set())  # copy bundle groups in the black
+        self.scalper = ScalpStrategy(cfg.scalp) if cfg.scalp.enabled else None  # scalp moves your traders start
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
@@ -74,10 +77,28 @@ class BotRunner:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def strategies(self) -> list:
+        return [self.strategy] + ([self.scalper] if self.scalper else [])
+
+    def _strategy(self, name: str):
+        return self.scalper if name == "scalp" and self.scalper else self.strategy
+
+    def refresh_trader_scores(self) -> None:
+        """The scalper's smart wallets: your traders with their score (wallets sharing a name = one person)."""
+        if not self.scalper:
+            return
+        scores = {}
+        for t in self.store.traders():
+            st = trader_stats(self.store, t["address"], t["label"] or "", self.cfg.clusters.closed_sold_frac)
+            scores[t["address"]] = ((t["label"] or "").strip() or short(t["address"]), st.score)
+        self.scalper.update_traders(scores)
+        self.extra_accounts |= set(scores)
+
     async def rebuild(self) -> None:
         index = build_clusters(self.store, self.cfg.clusters)
         black = index.black(self.cfg.selection)
         self.strategy.update_clusters(index.wallet_to_cluster, {c.cluster_id for c in black})
+        self.refresh_trader_scores()
         await self.refresh_accounts()
         log.info(
             "clusters: %d total, %d in the black, tracking %d wallets",
@@ -156,31 +177,41 @@ class BotRunner:
             self._meta_pending -= 1
 
     def _handle(self, ev: MarketEvent) -> None:
-        for action in self.strategy.on_event(ev):
-            self._spawn(self._execute(action))
+        for st in self.strategies():
+            for action in st.on_event(ev):
+                self._spawn(self._execute(action))
         self._sync()
 
     def _sync(self) -> None:
-        new = self.strategy.drain_new_watches()
-        if new:
-            self._spawn(self.feed.subscribe_tokens(new))
-            for mint in new:
+        new_all: list[str] = []
+        for st in self.strategies():
+            new = st.drain_new_watches()
+            new_all += [m for m in new if m not in new_all]
+            if st is self.strategy:
+                for mint in new:
+                    w = self.strategy.watches.get(mint)
+                    for listener in self.watch_listeners:
+                        try:
+                            listener(mint, w.cluster_id if w else "")
+                        except Exception:
+                            log.exception("watch listener failed")
+        if new_all:
+            self._spawn(self.feed.subscribe_tokens(new_all))
+            for mint in new_all:
                 self._spawn(self._check_token(mint))
-                w = self.strategy.watches.get(mint)
-                for listener in self.watch_listeners:
-                    try:
-                        listener(mint, w.cluster_id if w else "")
-                    except Exception:
-                        log.exception("watch listener failed")
-        done = self.strategy.drain_finished()
+        done: list[str] = []
+        for st in self.strategies():
+            done += st.drain_finished()
+        done = [m for m in dict.fromkeys(done) if not any(m in st.watches for st in self.strategies())]
         if done:
             self._spawn(self.feed.unsubscribe_tokens(done))
 
     async def _ticker(self) -> None:
         while True:
             await asyncio.sleep(2)
-            for action in self.strategy.on_tick(time.time()):
-                self._spawn(self._execute(action))
+            for st in self.strategies():
+                for action in st.on_tick(time.time()):
+                    self._spawn(self._execute(action))
             self._sync()
 
     # -- checks ----------------------------------------------------------------
@@ -197,18 +228,18 @@ class BotRunner:
                 break
             await asyncio.sleep(0.5)
         if not acct:
-            self.strategy.set_check(mint, False, "mint account not found")
+            self._set_check(mint, False, "mint account not found")
             return
         info = acct["data"]["parsed"]["info"]
         mint_auth, freeze = info.get("mintAuthority"), info.get("freezeAuthority")
         supply = int(info["supply"]) / 10 ** int(info["decimals"])
         if mint_auth is not None or freeze is not None:
-            self.strategy.set_check(mint, False, f"mintAuthority={mint_auth} freezeAuthority={freeze}", supply)
+            self._set_check(mint, False, f"mintAuthority={mint_auth} freezeAuthority={freeze}", supply)
             return
         use_panel = bool(self.scanner and self.cfg.strategy.require_holder_panel)
         use_larp = bool(self.larp and self.cfg.strategy.require_larp_check)
         if not (use_panel or use_larp):
-            self.strategy.set_check(mint, True, "", supply)
+            self._set_check(mint, True, "", supply)
             return
 
         async def panel_job() -> TokenPanel:
@@ -226,7 +257,7 @@ class BotRunner:
             return_exceptions=True,
         )
         if isinstance(panel_res, BaseException):
-            self.strategy.set_check(mint, False, f"holder panel failed: {panel_res}", supply)
+            self._set_check(mint, False, f"holder panel failed: {panel_res}", supply)
             return
         metrics: dict[str, float | None] = panel_res.metrics() if panel_res else {}
         if use_larp:
@@ -239,17 +270,25 @@ class BotRunner:
         if panel_res:
             log.info("panel %s", format_panel(panel_res, compact=True))
             self._spawn(self._refresh_panel(mint, panel_res))
-        self.strategy.set_check(mint, True, "", supply, metrics)
+        self._set_check(mint, True, "", supply, metrics)
+
+    def _set_check(self, mint: str, *args, **kwargs) -> None:
+        for st in self.strategies():
+            st.set_check(mint, *args, **kwargs)
+
+    def _watched(self, mint: str) -> bool:
+        return any(mint in st.watches for st in self.strategies())
 
     async def _refresh_panel(self, mint: str, panel: TokenPanel) -> None:
         assert self.scanner is not None
-        while mint in self.strategy.watches:
+        while self._watched(mint):
             await asyncio.sleep(self.cfg.strategy.panel_refresh_s)
-            if mint not in self.strategy.watches:
+            if not self._watched(mint):
                 return
             try:
                 panel = await self.scanner.refresh(panel)
-                self.strategy.update_metrics(mint, panel.metrics())
+                for st in self.strategies():
+                    st.update_metrics(mint, panel.metrics())
                 log.debug("panel %s", format_panel(panel, compact=True))
             except Exception as exc:
                 log.debug("panel refresh %s: %s", mint, exc)
@@ -282,45 +321,55 @@ class BotRunner:
     # -- orders ----------------------------------------------------------------
 
     async def _execute(self, a: Action) -> None:
+        st = self._strategy(a.strategy)
+        tag = "скальп" if a.strategy == "scalp" else "бандл"
+        paper = "" if self.broker.live else " (paper)"
         try:
             if a.side == "buy":
+                if any(a.mint in other.positions for other in self.strategies() if other is not st):
+                    st.on_buy_failed(a.mint)  # one position per token across strategies
+                    return
                 fill = await self.broker.buy(a.mint, a.sol_amount, a.ref_price)
                 if not fill:
-                    self.strategy.on_buy_failed(a.mint)
+                    st.on_buy_failed(a.mint)
                     return
                 pid = self.store.open_position(
                     mint=a.mint, cluster_id=a.cluster_id, live=int(self.broker.live), opened_at=fill.ts,
                     entry_price=fill.price, size_sol=fill.sol, tokens=fill.tokens, entry_sig=fill.signature,
-                    reason_open=a.reason,
+                    reason_open=a.reason, strategy=a.strategy,
                 )
-                self.strategy.on_buy_filled(a.mint, fill.price, fill.tokens, fill.sol, fill.ts, a.reason, pid)
-                log.info("BUY %s %.4f SOL @ %.3e (%s) cluster %s", a.mint, fill.sol, fill.price, a.reason, a.cluster_id)
+                pos = st.on_buy_filled(a.mint, fill.price, fill.tokens, fill.sol, fill.ts, a.reason, pid)
+                plan = getattr(pos, "plan", "")
+                if plan:
+                    self.store.close_position(pid, reason_open=f"{a.reason} | план: {plan}")
+                log.info("BUY[%s] %s %.4f SOL @ %.3e (%s)", a.strategy, a.mint, fill.sol, fill.price, a.reason)
                 self._say(
-                    f"🟢 КУПІВЛЯ{'' if self.broker.live else ' (paper)'} {self._token_name(a.mint)}\n"
-                    f"{fill.sol:.4f} SOL @ {fill.price:.3e}\nпричина: {ua_reason(a.reason)}\nгрупа: {a.cluster_id}"
+                    f"🟢 КУПІВЛЯ{paper} · {tag} · {self._token_name(a.mint)}\n"
+                    f"{fill.sol:.4f} SOL @ {fill.price:.3e}\nчому: {ua_reason(a.reason)}"
+                    + (f"\nплан: {plan}" if plan else f"\nгрупа: {a.cluster_id}")
                 )
             else:
-                pos = self.strategy.positions.get(a.mint)
+                pos = st.positions.get(a.mint)
                 fill = await self.broker.sell(a.mint, a.token_amount, a.ref_price)
                 if not fill:
-                    self.strategy.on_sell_failed(a.mint)
+                    st.on_sell_failed(a.mint)
                     return
-                pnl = self.strategy.on_sell_filled(a.mint, fill.price, fill.sol, fill.ts, a.reason)
+                pnl = st.on_sell_filled(a.mint, fill.price, fill.sol, fill.ts, a.reason)
                 if pos and pos.position_id is not None:
                     self.store.close_position(
                         pos.position_id, closed_at=fill.ts, exit_price=fill.price, exit_sol=fill.sol,
                         exit_sig=fill.signature, reason_close=a.reason, pnl_sol=pnl,
                     )
-                log.info("SELL %s -> %.4f SOL, pnl %+.4f (%s)", a.mint, fill.sol, pnl, a.reason)
+                log.info("SELL[%s] %s -> %.4f SOL, pnl %+.4f (%s)", a.strategy, a.mint, fill.sol, pnl, a.reason)
                 size = pos.size_sol if pos else 0.0
                 pct = f" ({pnl / size:+.0%})" if size else ""
                 self._say(
-                    f"{'✅' if pnl >= 0 else '🔻'} ПРОДАЖ{'' if self.broker.live else ' (paper)'} {self._token_name(a.mint)}\n"
-                    f"отримано {fill.sol:.4f} SOL, PnL {pnl:+.4f} SOL{pct}\nпричина: {ua_reason(a.reason)}"
+                    f"{'✅' if pnl >= 0 else '🔻'} ПРОДАЖ{paper} · {tag} · {self._token_name(a.mint)}\n"
+                    f"отримано {fill.sol:.4f} SOL, PnL {pnl:+.4f} SOL{pct}\nчому: {ua_reason(a.reason)}"
                 )
         except Exception as exc:
             log.exception("order %s %s failed: %s", a.side, a.mint, exc)
-            (self.strategy.on_buy_failed if a.side == "buy" else self.strategy.on_sell_failed)(a.mint)
+            (st.on_buy_failed if a.side == "buy" else st.on_sell_failed)(a.mint)
         finally:
             self._sync()
 

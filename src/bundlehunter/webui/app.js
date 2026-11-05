@@ -121,6 +121,7 @@ loaders.overview = async function () {
         w.in_position ? tag("у позиції", "green") : w.blocked ? `чекаю: ${w.blocked_ua || w.blocked}` : "чекаю входу"] })),
     ));
     $("open-positions").replaceChildren(positionsTable(positions.filter((p) => !p.closed_at)));
+    $("scalp").replaceChildren(...renderScalp(s.scalp));
   } catch (err) {
     fail($("cards"), err);
   }
@@ -284,6 +285,26 @@ async function showCluster(id) {
   }
 }
 
+function renderScalp(sc) {
+  if (!sc) return [el("p", { class: "muted" }, "Скальпінг вимкнено або бот не запущено ([scalp] enabled у config.toml).")];
+  const card = (label, value, cls) => el("div", { class: "card" }, el("div", { class: "label" }, label), el("div", { class: `value ${cls || ""}` }, value));
+  return [
+    el("div", { class: "cards" },
+      card("Стан", sc.state),
+      card("PnL сьогодні, SOL", signed(sc.today_pnl_sol, 3), pnlClass(sc.today_pnl_sol)),
+      card("Угод / в плюс", `${sc.trades} / ${sc.win_rate == null ? "–" : pct(sc.win_rate, 0)}`),
+      card("Збитків поспіль", sc.loss_streak),
+      card("Входів за годину", sc.entries_last_hour)),
+    el("h3", {}, "Чекаю підтвердження"),
+    table(["Mint", "Сильні гаманці", "Відколи", "Чому ще не вхід"],
+      sc.watching.map((w) => ({ cells: [mint(w.mint), w.smart.join(", "), ago(Date.now() / 1000 - w.age_s),
+        w.in_position ? tag("у позиції", "green") : (w.blocked || "перевіряю")] }))),
+    el("h3", {}, "Пропущені угоди (пропущена угода = 0 $ збитку)"),
+    table(["Коли", "Mint", "Чому не входив"],
+      sc.skipped.slice().reverse().map((x) => ({ cells: [ago(x.ts), mint(x.mint), x.why] }))),
+  ];
+}
+
 // -- traders ---------------------------------------------------------------------------
 
 const VERDICT_LVL = { "в плюсі": "green", "в мінусі": "red", "мало даних": "info" };
@@ -294,13 +315,16 @@ loaders.traders = async function () {
   try {
     const rows = await api("/api/traders");
     box.replaceChildren(table(
-      ["Трейдер", "Гаманець", "Висновок", { label: "PnL, SOL", num: true }, { label: "В плюс", num: true },
-        { label: "Угод", num: true }, { label: "Сер. вхід", num: true }, "Остання угода"],
+      ["Трейдер", "Гаманець", { label: "Score", num: true }, "Стиль", { label: "PnL, SOL", num: true },
+        { label: "В плюс", num: true }, { label: "PF", num: true }, { label: "Сер. ROI", num: true },
+        { label: "Угод", num: true }, { label: "Угод/день", num: true }, "Остання угода"],
       rows.map((t) => ({
         attrs: { class: "clickable", onclick: () => showTrader(t) },
-        cells: [t.label || short(t.address), mint(t.address), tag(t.verdict, VERDICT_LVL[t.verdict] || "info"),
-          el("span", { class: pnlClass(t.realized_pnl_sol) }, signed(t.realized_pnl_sol, 2)), pct(t.win_rate, 0),
-          t.closed, (t.avg_buy_sol || 0).toFixed(2), ago(t.last_trade)],
+        cells: [t.label || short(t.address), mint(t.address),
+          t.score == null ? tag("мало даних", "info") : tag(t.score.toFixed(0), t.score >= 80 ? "green" : t.score >= 60 ? "yellow" : "red"),
+          t.style, el("span", { class: pnlClass(t.realized_pnl_sol) }, signed(t.realized_pnl_sol, 2)), pct(t.win_rate, 0),
+          t.profit_factor == null ? "–" : t.profit_factor.toFixed(1), t.avg_roi == null ? "–" : pct(t.avg_roi, 0),
+          t.closed, t.trades_per_day.toFixed(1), ago(t.last_trade)],
       })),
     ));
   } catch (err) {
@@ -310,7 +334,14 @@ loaders.traders = async function () {
 
 function showTrader(t) {
   $("trader-detail").replaceChildren(el("div", { class: "box" },
-    el("h3", {}, `${t.label || short(t.address)}: останні токени`),
+    el("h3", {}, `${t.label || short(t.address)}: глибокий аналіз`),
+    el("p", {}, `Score ${t.score == null ? "– (менше 5 закритих угод)" : t.score.toFixed(0) + "/100"} · ${t.style} · ` +
+      `сер. виграш ${signed(t.avg_win_sol, 3)} SOL, сер. програш ${signed(t.avg_loss_sol, 3)} SOL · ` +
+      `profit factor ${t.profit_factor == null ? "–" : t.profit_factor.toFixed(2)} · ${t.trades_per_day.toFixed(1)} угод/день`),
+    el("p", { class: "muted" }, `Найкраща: ${t.best ? short(t.best.mint) + " " + signed(t.best.pnl, 2) : "–"} · ` +
+      `найгірша: ${t.worst ? short(t.worst.mint) + " " + signed(t.worst.pnl, 2) : "–"}. ` +
+      "Score: 40% відсоток угод у плюс, 30% profit factor, 20% PnL, 10% кількість угод. Скальпер підходить для копіювання; бот/снайпер — ні."),
+    el("h3", {}, "Останні токени"),
     table(["Купив", "Mint", { label: "Вклав", num: true }, { label: "Вивів", num: true }, { label: "PnL", num: true }, "Стан"],
       t.recent.map((r) => ({ cells: [ago(r.first_buy), mint(r.mint), r.sol_in.toFixed(3), r.sol_out.toFixed(3),
         el("span", { class: pnlClass(r.pnl) }, signed(r.pnl, 3)), r.closed ? "закрито" : "ще тримає"] }))),
@@ -321,8 +352,8 @@ function showTrader(t) {
 
 function positionsTable(rows) {
   return table(
-    ["Відкрито", "Токен", "Mint", "Режим", { label: "Розмір, SOL", num: true }, { label: "PnL, SOL", num: true }, "Вхід → вихід"],
-    rows.map((p) => ({ cells: [ago(p.opened_at), p.symbol || "?", mint(p.mint), p.live ? tag("LIVE", "red") : "paper",
+    ["Відкрито", "Стратегія", "Токен", "Mint", "Режим", { label: "Розмір, SOL", num: true }, { label: "PnL, SOL", num: true }, "Вхід → вихід"],
+    rows.map((p) => ({ cells: [ago(p.opened_at), p.strategy === "scalp" ? tag("скальп", "info") : "бандл", p.symbol || "?", mint(p.mint), p.live ? tag("LIVE", "red") : "paper",
       (p.size_sol || 0).toFixed(3),
       p.closed_at ? el("span", { class: pnlClass(p.pnl_sol) }, signed(p.pnl_sol, 4)) : tag("відкрита", "green"),
       `${p.reason_open_ua || p.reason_open || ""} → ${p.reason_close_ua || p.reason_close || "…"}`] })),
