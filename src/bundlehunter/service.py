@@ -239,12 +239,23 @@ class Service:
             ]
         return out
 
+    def scalp_eval(self) -> str:
+        from .scalp_lab import evaluate, format_result
+
+        if self.runner is not None:
+            self.runner.flush_recordings()
+        result = evaluate(self.store, self.cfg)
+        if self.runner is not None:
+            self.runner.apply_validation(result)
+        return format_result(result)
+
     # -- paper money ----------------------------------------------------------------
 
     def paper(self, action: str = "", amount: float = 0.0) -> float:
         """'' -> balance; deposit / withdraw / reset (sets the balance)."""
         if self.runner is not None and self.runner.broker.live:
             raise ValueError("бот у LIVE-режимі: паперовий рахунок зараз не використовується")
+        self.store.paper_balance(default=self.cfg.execution.paper_start_sol)  # open the account first
         if action == "deposit":
             return self.store.paper_move("deposit", abs(amount), "manual")
         if action == "withdraw":

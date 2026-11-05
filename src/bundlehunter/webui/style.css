@@ -113,3 +113,10 @@ td.num, th.num { text-align: right; }
 .pos { color: var(--green); }
 .neg { color: var(--red); }
 .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 12px; }
+
+.box.warn { border-color: var(--yellow); }
+.box.paper { margin-top: 12px; }
+.btn.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+.btn + .btn { margin-left: 4px; }
+input.amount { width: 110px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--panel); color: var(--text); font: inherit; }

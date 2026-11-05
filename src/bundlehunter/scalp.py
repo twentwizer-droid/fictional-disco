@@ -143,6 +143,10 @@ class ScalpStrategy:
             raise ValueError(f"scalp.exit_mode must be smart / never_lose / fixed, got {cfg.exit_mode!r}")
         self.cfg = cfg
         self.cost_model = None  # size_sol -> round-trip cost fraction (the paper broker's real figure)
+        self.recorder = None  # (event, (person, score) | None) -> None: feeds bh scalp eval
+        self.check_recorder = None  # (mint, ok, reason, metrics) -> None
+        self.validated: dict | None = None  # result of the last evaluation (see scalp_lab)
+        self.live = False  # set by the runner from the broker
         self.traders: dict[str, tuple[str, float | None]] = dict(traders or {})  # wallet -> (person, score)
         self.watches: dict[str, ScalpWatch] = {}
         self.positions: dict[str, ScalpPosition] = {}
@@ -180,6 +184,8 @@ class ScalpStrategy:
             w.check_ok, w.check_reason = ok, reason
             if metrics is not None:
                 w.metrics = metrics
+            if self.check_recorder:
+                self.check_recorder(mint, ok, reason, metrics)
 
     def update_metrics(self, mint: str, metrics: dict[str, float | None]) -> None:
         w = self.watches.get(mint)
@@ -214,6 +220,9 @@ class ScalpStrategy:
                 for w in self.watches.values()
             ],
             "skipped": [{"ts": ts, "mint": m, "why": why} for ts, m, why in list(self.skipped)[-15:]],
+            "exit_mode": self.cfg.exit_mode,
+            "validated": self.validated,
+            "gate": self.gate_block(self.live, now) or "ok",
         }
 
     # -- events ----------------------------------------------------------------------------
@@ -232,6 +241,8 @@ class ScalpStrategy:
             self._seen.add(ev.mint)
             self._new.append(ev.mint)
             log.info("scalp watch %s: %s (score %s) bought", ev.mint, trader[0], trader[1])  # type: ignore[index]
+        if self.recorder:
+            self.recorder(ev, trader)
 
         if ev.kind in ("buy", "sell") and ev.price > 0:
             w.trades.append((ev.ts, ev.kind, ev.sol_amount, ev.wallet, ev.price))
@@ -260,6 +271,18 @@ class ScalpStrategy:
 
     # -- decisions -------------------------------------------------------------------------
 
+    def gate_block(self, live: bool, now: float) -> str:
+        """No strategy validated on unseen data -> no trades (live only by default)."""
+        cfg = self.cfg
+        if cfg.gate == "off" or (cfg.gate == "live" and not live):
+            return ""
+        v = self.validated
+        if not v or not v.get("validated"):
+            return "немає перевіреної стратегії: bh scalp eval має дати плюс на нових даних"
+        if now - float(v.get("ts", 0)) > cfg.validated_max_age_s:
+            return "перевірка застаріла: потрібна нова bh scalp eval"
+        return ""
+
     def risk_block(self, now: float) -> str:
         cfg = self.cfg
         if now < self.paused_until:
@@ -272,7 +295,7 @@ class ScalpStrategy:
             return "забагато угод за годину"
         if len(self.positions) >= cfg.max_open_positions:
             return "максимум відкритих позицій"
-        return ""
+        return self.gate_block(self.live, now)
 
     def _entry(self, w: ScalpWatch, now: float) -> list[Action]:
         cfg = self.cfg

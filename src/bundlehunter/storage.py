@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS traders (
     added_at REAL
 );
 
+-- everything the scalper saw, for replaying it offline (bh scalp eval)
+CREATE TABLE IF NOT EXISTS scalp_events (
+    mint TEXT NOT NULL, ts REAL NOT NULL, kind TEXT NOT NULL, wallet TEXT, sol REAL, tokens REAL, price REAL,
+    person TEXT, score REAL
+);
+CREATE INDEX IF NOT EXISTS scalp_events_mint ON scalp_events(mint, ts);
+CREATE TABLE IF NOT EXISTS scalp_checks (mint TEXT PRIMARY KEY, ok INTEGER, reason TEXT, metrics TEXT, ts REAL);
+
 -- paper money: one balance, every movement logged
 CREATE TABLE IF NOT EXISTS paper_account (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -357,6 +365,30 @@ class Store:
 
     def traders(self) -> list[dict[str, Any]]:
         return [dict(r) for r in self.db.execute("SELECT * FROM traders ORDER BY added_at")]
+
+    # -- scalper recordings ------------------------------------------------------
+
+    def record_scalp_events(self, rows: list[tuple]) -> None:
+        if rows:
+            self.db.executemany("INSERT INTO scalp_events VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            self.db.commit()
+
+    def record_scalp_check(self, mint: str, ok: bool, reason: str, metrics: dict | None) -> None:
+        import json
+
+        self.db.execute("INSERT OR REPLACE INTO scalp_checks VALUES (?,?,?,?,?)",
+                        (mint, int(ok), reason, json.dumps(metrics or {}), time.time()))
+        self.db.commit()
+
+    def scalp_recordings(self) -> tuple[dict[str, list[dict]], dict[str, dict]]:
+        import json
+
+        events: dict[str, list[dict]] = {}
+        for r in self.db.execute("SELECT * FROM scalp_events ORDER BY ts, rowid"):
+            events.setdefault(r["mint"], []).append(dict(r))
+        checks = {r["mint"]: {"ok": bool(r["ok"]), "reason": r["reason"], "metrics": json.loads(r["metrics"] or "{}")}
+                  for r in self.db.execute("SELECT * FROM scalp_checks")}
+        return events, checks
 
     # -- paper account ---------------------------------------------------------
 

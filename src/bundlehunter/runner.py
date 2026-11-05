@@ -32,6 +32,7 @@ from .parser import parse_transaction
 from .rpc import SolanaRpc
 from .storage import Store
 from .scalp import ScalpStrategy
+from .scalp_lab import evaluate, format_result, load_validated
 from .strategy import Action, Strategy
 from .traders import short, trader_stats
 
@@ -70,6 +71,12 @@ class BotRunner:
         self.scalper = ScalpStrategy(cfg.scalp) if cfg.scalp.enabled else None  # scalp moves your traders start
         if self.scalper and hasattr(broker, "round_trip_cost_pct"):
             self.scalper.cost_model = broker.round_trip_cost_pct  # real paper costs for the TP floor
+        self._recorded: list[tuple] = []
+        if self.scalper:
+            self.scalper.live = bool(broker.live)
+            self.scalper.recorder = self._record_scalp
+            self.scalper.check_recorder = lambda m, ok, why, met: self.store.record_scalp_check(m, ok, why, met)
+            self.apply_validation(load_validated())
         self._live_cap_warned = False
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
@@ -79,6 +86,40 @@ class BotRunner:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def _record_scalp(self, ev: MarketEvent, trader: tuple | None) -> None:
+        person, score = trader if trader else (None, None)
+        self._recorded.append((ev.mint, ev.ts, ev.kind, ev.wallet, ev.sol_amount, ev.token_amount, ev.price, person, score))
+
+    def flush_recordings(self) -> None:
+        rows, self._recorded = self._recorded, []
+        try:
+            self.store.record_scalp_events(rows)
+        except Exception:
+            log.exception("could not store scalp recordings")
+
+    def apply_validation(self, result: dict | None) -> None:
+        """A validated result also sets the exit mode it was validated with."""
+        if not self.scalper:
+            return
+        self.scalper.validated = result
+        if result and result.get("validated") and result.get("mode"):
+            self.scalper.cfg.exit_mode = result["mode"]
+
+    async def _eval_loop(self) -> None:
+        """Re-validate the scalper on fresh recordings every eval_every_s."""
+        while True:
+            await asyncio.sleep(self.cfg.scalp.eval_every_s)
+            try:
+                self.flush_recordings()
+                result = evaluate(self.store, self.cfg)
+                was = bool(self.scalper and self.scalper.validated and self.scalper.validated.get("validated"))
+                self.apply_validation(result)
+                log.info("scalp eval: validated=%s mode=%s", result["validated"], result["mode"])
+                if result["validated"] != was:
+                    self._say("🧪 Перевірка скальпера на нових даних\n" + format_result(result))
+            except Exception:
+                log.exception("scalp eval failed")
 
     def strategies(self) -> list:
         return [self.strategy] + ([self.scalper] if self.scalper else [])
@@ -115,6 +156,8 @@ class BotRunner:
         await self.rebuild()
         await self.feed.subscribe_new_tokens()
         loops = [self._consume(), self._ticker()]
+        if self.scalper:
+            loops.append(self._eval_loop())
         if self.analyzer:
             loops.append(self._analysis_loop())
         await asyncio.gather(*loops)
@@ -216,6 +259,8 @@ class BotRunner:
                 for action in st.on_tick(time.time()):
                     self._spawn(self._execute(action))
             self._sync()
+            if self._recorded:
+                self.flush_recordings()
 
     # -- checks ----------------------------------------------------------------
 

@@ -55,6 +55,7 @@ HELP = """<b>bundlehunter</b> 🤖
 <b>/rank</b> [скільки] — завантажити історію і відсортувати трейдерів за реальним PnL
 
 <b>/scalp</b> — скальпінг: стан, що чекає підтвердження, які угоди пропущено і чому
+<b>/scalp eval</b> — перевірити скальпер на записаних токенах, яких він не бачив
 <b>/paper</b> [deposit|withdraw|reset сума] — паперовий баланс
 
 Можна просто надіслати адресу токена або слова наратива."""
@@ -251,6 +252,16 @@ def fmt_scalp(sc: dict[str, Any] | None) -> str:
         f"Стан: {e(sc['state'])}",
         f"PnL сьогодні {sc['today_pnl_sol']:+.4f} SOL · угод {sc['trades']} · в плюс {wr} · збитків поспіль {sc['loss_streak']}",
     ]
+    v = sc.get("validated")
+    if v:
+        u = v.get("unseen") or {}
+        avg = f"{u['avg_ret']:+.1%}" if u.get("avg_ret") is not None else "–"
+        lines.append(("Стратегія перевірена ✅" if v.get("validated") else "Стратегія НЕ перевірена ⛔")
+                     + f" · режим {e(v.get('mode'))} · на нових токенах {u.get('trades', 0)} угод, сер. {avg}")
+    else:
+        lines.append("Перевірки ще не було: /scalp eval")
+    if sc.get("gate") and sc["gate"] != "ok":
+        lines.append(f"⛔ {e(sc['gate'])}")
     if sc["watching"]:
         lines += ["", "<b>Чекаю підтвердження</b>"]
         for w in sc["watching"][:10]:
@@ -453,6 +464,9 @@ class TelegramBot:
             bal = self.service.paper(action, value)
             await self.send(chat_id, f"📝 Паперовий баланс: <b>{bal:.4f} SOL</b>\n"
                                      "Змінити: /paper deposit 1 · /paper withdraw 0.5 · /paper reset 2")
+        elif cmd == "/scalp" and arg.strip().lower() in ("eval", "перевірка", "проверка"):
+            await self.send(chat_id, "⏳ Проганяю записи через скальпер: вибір режиму на старих токенах, перевірка на нових…")
+            await self.send(chat_id, e(self.service.scalp_eval()))
         elif cmd == "/scalp":
             await self.send(chat_id, fmt_scalp(self.service.status().get("scalp")))
         elif cmd == "/positions":

@@ -20,6 +20,14 @@ function el(tag, attrs, ...children) {
   return node;
 }
 
+async function post(path, body) {
+  const resp = await fetch(path, { method: "POST", credentials: "same-origin",
+    headers: { "Content-Type": "application/json", "X-BH-Action": "1" }, body: JSON.stringify(body || {}) });
+  const data = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data;
+}
+
 async function api(path) {
   const resp = await fetch(path, { credentials: "same-origin" });
   const data = await resp.json().catch(() => ({ error: `HTTP ${resp.status}` }));
@@ -126,6 +134,7 @@ loaders.overview = async function () {
     ));
     $("open-positions").replaceChildren(positionsTable(positions.filter((p) => !p.closed_at)));
     $("scalp").replaceChildren(...renderScalp(s.scalp));
+    $("paper").replaceChildren(...renderPaper(s.paper));
   } catch (err) {
     fail($("cards"), err);
   }
@@ -299,6 +308,7 @@ function renderScalp(sc) {
       card("Угод / в плюс", `${sc.trades} / ${sc.win_rate == null ? "–" : pct(sc.win_rate, 0)}`),
       card("Збитків поспіль", sc.loss_streak),
       card("Входів за годину", sc.entries_last_hour)),
+    renderValidation(sc),
     el("h3", {}, "Чекаю підтвердження"),
     table(["Mint", "Сильні гаманці", "Відколи", "Чому ще не вхід"],
       sc.watching.map((w) => ({ cells: [mint(w.mint), w.smart.join(", "), ago(Date.now() / 1000 - w.age_s),
@@ -307,6 +317,56 @@ function renderScalp(sc) {
     table(["Коли", "Mint", "Чому не входив"],
       sc.skipped.slice().reverse().map((x) => ({ cells: [ago(x.ts), mint(x.mint), x.why] }))),
   ];
+}
+
+function renderValidation(sc) {
+  const v = sc.validated;
+  const u = (v && v.unseen) || {};
+  const box = el("div", { class: `box ${v && v.validated ? "" : "warn"}` },
+    el("h3", {}, v ? (v.validated ? "Стратегія перевірена" : "Стратегія не перевірена") : "Перевірки ще не було"),
+    v ? el("p", {}, `Режим виходу: ${v.mode}. Вибір на ${v.tokens.choose_on} старих токенах, перевірка на ${v.tokens.judge_on} нових: ` +
+      `${u.trades || 0} угод, середня ${u.avg_ret == null ? "–" : signed(u.avg_ret * 100, 1) + "%"}, ` +
+      `медіана ${u.median_ret == null ? "–" : signed(u.median_ret * 100, 1) + "%"}, ` +
+      `найбільший токен ${u.top_token_share == null ? "–" : pct(u.top_token_share, 0)} прибутку.`) : null,
+    ...(v && v.reasons ? v.reasons.map((r) => el("p", { class: "muted" }, `✗ ${r}`)) : []),
+    el("p", { class: "muted" }, sc.gate === "ok" ? "Купівлі дозволені." : `Купівлі заблоковано: ${sc.gate}`),
+    el("button", { class: "btn", type: "button", onclick: runEval }, "Перевірити зараз"),
+    el("span", { id: "eval-note", class: "muted" }, ""));
+  return box;
+}
+
+async function runEval(ev) {
+  const b = ev.currentTarget;
+  b.disabled = true;
+  $("eval-note").textContent = "  Проганяю записи через скальпер…";
+  try {
+    await post("/api/scalp/eval");
+    await loaders.overview();
+  } catch (err) {
+    $("eval-note").textContent = `  Помилка: ${err.message}`;
+  } finally {
+    b.disabled = false;
+  }
+}
+
+function renderPaper(p) {
+  if (!p) return [];
+  const amount = el("input", { type: "number", min: "0", step: "0.1", value: "1", id: "paper-amount", class: "amount" });
+  const act = (action) => async () => {
+    try {
+      await post("/api/paper", { action, amount: Number(amount.value) });
+      await loaders.overview();
+    } catch (err) {
+      alert(err.message);
+    }
+  };
+  return [el("div", { class: "box paper" },
+    el("h3", {}, `Паперовий баланс: ${p.balance_sol.toFixed(4)} SOL`),
+    el("div", { class: "search" }, amount, el("span", { class: "muted" }, "SOL"),
+      el("button", { class: "btn", type: "button", onclick: act("deposit") }, "Поповнити"),
+      el("button", { class: "btn ghost", type: "button", onclick: act("withdraw") }, "Вивести"),
+      el("button", { class: "btn ghost", type: "button", onclick: act("reset") }, "Скинути до суми")),
+    el("p", { class: "muted" }, "Скидання починає перевірку з нуля. Папір платить реальні комісії й проскальзування."))];
 }
 
 // -- traders ---------------------------------------------------------------------------

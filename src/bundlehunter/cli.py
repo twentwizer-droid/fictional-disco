@@ -378,6 +378,21 @@ async def cmd_wallet(cfg: Config, store: Store, args: argparse.Namespace) -> Non
     print(f"all-time live pnl {store.live_realized_pnl():+.4f} SOL (stop at -{cfg.execution.live_max_total_loss_sol})")
 
 
+def cmd_scalp(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """eval: validate the scalper on recorded tokens it never saw; status: the last result."""
+    from .scalp_lab import evaluate, format_result, load_validated
+
+    if args.action == "eval":
+        if args.split:
+            cfg.scalp.eval_split = args.split
+        print(format_result(evaluate(store, cfg)))
+        return
+    r = load_validated()
+    events, _ = store.scalp_recordings()
+    print(f"recorded tokens: {len(events)}, events: {sum(len(v) for v in events.values())}")
+    print(format_result(r) if r else "no evaluation yet: bh scalp eval")
+
+
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     index = build_clusters(store, cfg.clusters)
     clusters = list(index.clusters.values())
@@ -607,6 +622,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-telegram", action="store_true")
     s.add_argument("--no-web", action="store_true")
 
+    s = sub.add_parser("scalp", help="scalper validation: eval (replay on unseen tokens) | status")
+    s.add_argument("action", nargs="?", default="status", choices=["eval", "status"])
+    s.add_argument("--split", type=float, default=None, help="share of oldest tokens used to choose (default 0.7)")
+
     s = sub.add_parser("paper", help="paper money: balance | deposit X | withdraw X | reset X | history")
     s.add_argument("action", nargs="?", default="balance", choices=["balance", "deposit", "withdraw", "reset", "history"])
     s.add_argument("amount", nargs="?", type=float)
@@ -641,6 +660,7 @@ def main(argv: list[str] | None = None) -> None:
         "run": cmd_run,
         "serve": cmd_serve,
         "paper": cmd_paper,
+        "scalp": cmd_scalp,
         "wallet": cmd_wallet,
         "positions": cmd_positions,
     }

@@ -106,6 +106,27 @@ def create_app(service: Service, password: str | None = None) -> web.Application
     async def traders(request: web.Request) -> web.Response:
         return _json([t.to_dict() for t in service.traders()])
 
+    def require_intent(request: web.Request) -> None:
+        # a custom header: plain cross-site forms cannot send it, so other sites cannot press our buttons
+        if request.headers.get("X-BH-Action") != "1":
+            raise web.HTTPForbidden()
+
+    async def paper(request: web.Request) -> web.Response:
+        require_intent(request)
+        body = await request.json()
+        action = str(body.get("action", ""))
+        if action not in ("", "deposit", "withdraw", "reset"):
+            raise ValueError("невідома дія")
+        amount = float(body.get("amount") or 0)
+        if action and not (0 < amount < 1e6):
+            raise ValueError("вкажи суму більше 0")
+        return _json({"balance_sol": service.paper(action, amount)})
+
+    async def scalp_eval(request: web.Request) -> web.Response:
+        require_intent(request)
+        text = service.scalp_eval()
+        return _json({"text": text, "status": service.status().get("scalp")})
+
     async def positions(request: web.Request) -> web.Response:
         return _json(service.positions())
 
@@ -120,6 +141,8 @@ def create_app(service: Service, password: str | None = None) -> web.Application
         web.get("/api/narrative", narrative),
         web.get("/api/positions", positions),
         web.get("/api/traders", traders),
+        web.post("/api/paper", paper),
+        web.post("/api/scalp/eval", scalp_eval),
     ])
     return app
 

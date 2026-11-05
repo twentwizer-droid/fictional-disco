@@ -199,6 +199,16 @@ class ScalpConfig:
     runner_trail_pct: float = 0.25  # wider trailing once the trade has doubled
     never_lose_arm_pct: float = 0.10  # never_lose: profit beyond costs that locks break-even
     never_lose_max_wait_s: float = 1800.0  # never_lose: still under water after 30 min -> exit anyway
+    # validation gate: trade only settings that made money on recorded data they never saw
+    gate: str = "live"  # "live" = live needs a validated strategy (paper keeps trading to collect data),
+    #                     "always" = paper too, "off" = never
+    eval_every_s: float = 6 * 3600
+    eval_split: float = 0.7  # pick the exit mode on the oldest 70% of tokens, judge it on the newest 30%
+    fill_delay_s: float = 2.0  # replay fills at the price this much after the decision
+    min_test_trades: int = 8
+    min_avg_trade_pct: float = 0.01  # >= +1% per trade on unseen tokens
+    max_token_profit_share: float = 0.20  # no single token may bring more than 20% of the profit
+    validated_max_age_s: float = 3 * 86400
     # fake-pump filters
     staircase_veto: bool = True  # even buys in steps, no sells, no wicks = a painted chart
     dump_into_smart_veto_pct: float = 0.30  # bundle/insiders already sold 30% when smart wallets buy = two-step setup
