@@ -68,6 +68,9 @@ class BotRunner:
         self.started_at = time.time()
         self.strategy = Strategy(cfg.strategy, {}, set())  # copy bundle groups in the black
         self.scalper = ScalpStrategy(cfg.scalp) if cfg.scalp.enabled else None  # scalp moves your traders start
+        if self.scalper and hasattr(broker, "round_trip_cost_pct"):
+            self.scalper.cost_model = broker.round_trip_cost_pct  # real paper costs for the TP floor
+        self._live_cap_warned = False
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
         self._tasks: set[asyncio.Task] = set()
@@ -320,6 +323,34 @@ class BotRunner:
 
     # -- orders ----------------------------------------------------------------
 
+    async def _free_balance(self) -> float | None:
+        try:
+            if hasattr(self.broker, "balance_sol"):
+                return await self.broker.balance_sol()
+            if hasattr(self.broker, "balance"):
+                return self.broker.balance()
+        except Exception as exc:
+            log.warning("balance check failed: %s", exc)
+        return None
+
+    async def _size(self, a: Action) -> tuple[float, str]:
+        """Stake: what the strategy asks, but never more than max_stake_pct of the free balance."""
+        ex = self.cfg.execution
+        if self.broker.live and self.store.live_realized_pnl() <= -ex.live_max_total_loss_sol:
+            if not self._live_cap_warned:
+                self._live_cap_warned = True
+                self._say(f"⛔ LIVE зупинено: загальний збиток досяг {ex.live_max_total_loss_sol} SOL. "
+                          "Нові покупки вимкнені, поки ти не зміниш live_max_total_loss_sol.")
+            return 0.0, "ліміт загального збитку live"
+        bal = await self._free_balance()
+        if bal is None:
+            return a.sol_amount, ""
+        free = bal - ex.reserve_sol
+        size = min(a.sol_amount, free * ex.max_stake_pct)
+        if size < 0.005:
+            return 0.0, f"мало коштів: вільно {max(free, 0):.4f} SOL"
+        return size, ""
+
     async def _execute(self, a: Action) -> None:
         st = self._strategy(a.strategy)
         tag = "скальп" if a.strategy == "scalp" else "бандл"
@@ -329,7 +360,12 @@ class BotRunner:
                 if any(a.mint in other.positions for other in self.strategies() if other is not st):
                     st.on_buy_failed(a.mint)  # one position per token across strategies
                     return
-                fill = await self.broker.buy(a.mint, a.sol_amount, a.ref_price)
+                size, why = await self._size(a)
+                if size <= 0:
+                    log.info("buy %s skipped: %s", a.mint, why)
+                    st.on_buy_failed(a.mint)
+                    return
+                fill = await self.broker.buy(a.mint, size, a.ref_price)
                 if not fill:
                     st.on_buy_failed(a.mint)
                     return
@@ -350,9 +386,19 @@ class BotRunner:
                 )
             else:
                 pos = st.positions.get(a.mint)
-                fill = await self.broker.sell(a.mint, a.token_amount, a.ref_price)
+                partial = a.fraction < 0.999 and hasattr(st, "on_partial_filled")
+                fill = await self.broker.sell(a.mint, a.token_amount, a.ref_price, fraction=a.fraction)
                 if not fill:
                     st.on_sell_failed(a.mint)
+                    return
+                if partial:
+                    st.on_partial_filled(a.mint, fill.price, fill.sol, fill.tokens, fill.ts)
+                    if pos and pos.position_id is not None:
+                        self.store.db.execute("UPDATE positions SET partial_sol = partial_sol + ? WHERE id = ?",
+                                              (fill.sol, pos.position_id))
+                        self.store.db.commit()
+                    self._say(f"💰 ЧАСТКОВИЙ ПРОДАЖ{paper} · {tag} · {self._token_name(a.mint)}\n"
+                              f"отримано {fill.sol:.4f} SOL\nчому: {ua_reason(a.reason)}")
                     return
                 pnl = st.on_sell_filled(a.mint, fill.price, fill.sol, fill.ts, a.reason)
                 if pos and pos.position_id is not None:
@@ -365,7 +411,7 @@ class BotRunner:
                 pct = f" ({pnl / size:+.0%})" if size else ""
                 self._say(
                     f"{'✅' if pnl >= 0 else '🔻'} ПРОДАЖ{paper} · {tag} · {self._token_name(a.mint)}\n"
-                    f"отримано {fill.sol:.4f} SOL, PnL {pnl:+.4f} SOL{pct}\nчому: {ua_reason(a.reason)}"
+                    f"PnL {pnl:+.4f} SOL{pct}\nчому: {ua_reason(a.reason)}"
                 )
         except Exception as exc:
             log.exception("order %s %s failed: %s", a.side, a.mint, exc)

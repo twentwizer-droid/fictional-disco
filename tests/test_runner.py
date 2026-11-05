@@ -168,13 +168,15 @@ def test_runner_scalps_on_paper_end_to_end():
 
     events = [e("buy", "smartguy", 1e-6, 0, 1.0)]
     events += [e("buy", f"r{i}", 1e-6 * (1 + 0.01 * i), 1 + i) for i in range(6)]  # volume confirms
-    events += [e("buy", "late", 1.7e-6, 20, 0.2)]  # +70%: take profit
+    events += [e("buy", "late", 1.7e-6, 20, 0.2)]  # +70%: TP1, half sold, stop to break-even
+    events += [e("sell", "dump", 1.2e-6, 21 + i, 0.1) for i in range(6)]  # stays under the stop > 4 s
     feed = FakeFeed(events)
     cfg = Config()
     cfg.strategy.panel_delay_s = 0
     cfg.scalp.strong_trader_score = 70
     larp = FakeLarp()
-    runner = BotRunner(cfg, store, FakeRpc(), PaperBroker(), feed, scanner=FakeScanner(), larp=larp)
+    broker = PaperBroker(2.0, 0.0007, 1.25, store=store, start_balance=1.0)
+    runner = BotRunner(cfg, store, FakeRpc(), broker, feed, scanner=FakeScanner(), larp=larp)
     said = []
 
     async def notify(text):
@@ -191,7 +193,8 @@ def test_runner_scalps_on_paper_end_to_end():
 
     asyncio.run(go())
     (pos,) = store.positions()
-    assert pos["strategy"] == "scalp" and pos["closed_at"] and pos["pnl_sol"] > 0
-    assert "Alpha" in pos["reason_open"] and "план: TP +" in pos["reason_open"]
-    assert pos["reason_close"].startswith("тейк-профіт")
-    assert any("скальп" in t and "план:" in t for t in said) and any("ПРОДАЖ" in t for t in said)
+    assert pos["strategy"] == "scalp" and pos["closed_at"] and pos["partial_sol"] > 0
+    assert "Alpha" in pos["reason_open"] and "TP1" in pos["reason_open"]
+    assert pos["reason_close"].startswith("трейлінг") and pos["pnl_sol"] > 0  # never gave the win back
+    assert any("ЧАСТКОВИЙ" in t for t in said) and any(t.startswith("✅ ПРОДАЖ") for t in said)
+    assert store.paper_balance() > 1.0  # paid from and back into the paper balance

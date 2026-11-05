@@ -322,6 +322,62 @@ async def cmd_trader(cfg: Config, store: Store, args: argparse.Namespace) -> Non
         print(f"  {t.mint}  in {t.sol_in:7.3f}  out {t.sol_out:7.3f}  pnl {t.pnl:+7.3f}  {'closed' if t.closed else 'open'}")
 
 
+def cmd_paper(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Paper money: balance | deposit X | withdraw X | reset X | history."""
+    ex = cfg.execution
+    if args.action == "history":
+        for r in store.paper_ledger(30):
+            print(f"{_ts(r['ts'])}  {r['kind']:8} {r['amount']:+10.4f}  -> {r['balance']:.4f}  {r['note'] or ''}")
+        return
+    if args.action in ("deposit", "withdraw", "reset") and args.amount is None:
+        sys.exit(f"give an amount: bh paper {args.action} 1.5")
+    if args.action == "deposit":
+        store.paper_move("deposit", abs(args.amount), "manual")
+    elif args.action == "withdraw":
+        store.paper_move("withdraw", -abs(args.amount), "manual")
+    elif args.action == "reset":
+        store.paper_move("reset", abs(args.amount), "manual", absolute=True)
+    print(f"paper balance: {store.paper_balance(default=ex.paper_start_sol):.4f} SOL")
+
+
+async def cmd_wallet(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Real wallet for live trading: set (hidden input) | show | forget."""
+    import getpass
+
+    from .execution import WALLET_FILE, load_keypair, save_keypair
+
+    if args.action == "set":
+        print("Use a NEW hot wallet holding only what you can lose. The key is stored in", WALLET_FILE,
+              "(owner-only), never printed, never sent anywhere.")
+        secret = getpass.getpass("Private key (base58 or [..] JSON), input hidden: ")
+        try:
+            address = save_keypair(secret)
+        except Exception:
+            sys.exit("that is not a valid Solana private key")
+        print(f"saved. wallet address: {address}")
+        return
+    if args.action == "forget":
+        if os.path.exists(WALLET_FILE):
+            os.remove(WALLET_FILE)
+            print("wallet key deleted")
+        else:
+            print("no stored wallet")
+        return
+    try:
+        kp = load_keypair()
+    except Exception as exc:
+        sys.exit(str(exc))
+    address = str(kp.pubkey())
+    rpc = _rpc(cfg)
+    try:
+        bal = await rpc.get_balance(address) / 1e9
+    finally:
+        await rpc.close()
+    live = os.environ.get("BH_LIVE_TRADING") == "1"
+    print(f"address {address}\nbalance {bal:.4f} SOL\nlive trading switch BH_LIVE_TRADING=1: {'ON' if live else 'off'}")
+    print(f"all-time live pnl {store.live_realized_pnl():+.4f} SOL (stop at -{cfg.execution.live_max_total_loss_sol})")
+
+
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     index = build_clusters(store, cfg.clusters)
     clusters = list(index.clusters.values())
@@ -403,7 +459,10 @@ async def _build_runner(
         bal = await trade_rpc.get_balance(broker.pubkey) / 1e9
         logging.warning("LIVE TRADING from %s (balance %.4f SOL), buy_sol=%s", broker.pubkey, bal, cfg.strategy.buy_sol)
     else:
-        broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol)
+        ex = cfg.execution
+        broker = PaperBroker(ex.paper_slippage_pct, ex.paper_fee_sol, ex.paper_fee_pct, store=store,
+                             start_balance=ex.paper_start_sol)
+        logging.info("paper balance %.4f SOL (bh paper deposit / reset to change)", store.paper_balance())
         logging.info("paper trading (no real orders). Use --live to trade for real.")
     analyzer = None if args.no_analyze else Analyzer(analysis_rpc, store, cfg.analyzer)
     # the holder panel and LARP check are on the trading path, so they use the trading RPC client
@@ -548,6 +607,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-telegram", action="store_true")
     s.add_argument("--no-web", action="store_true")
 
+    s = sub.add_parser("paper", help="paper money: balance | deposit X | withdraw X | reset X | history")
+    s.add_argument("action", nargs="?", default="balance", choices=["balance", "deposit", "withdraw", "reset", "history"])
+    s.add_argument("amount", nargs="?", type=float)
+
+    s = sub.add_parser("wallet", help="real wallet for live trading: set | show | forget")
+    s.add_argument("action", nargs="?", default="show", choices=["set", "show", "forget"])
+
     sub.add_parser("positions", help="list the bot's paper/live positions")
     return p
 
@@ -574,6 +640,8 @@ def main(argv: list[str] | None = None) -> None:
         "backtest": cmd_backtest,
         "run": cmd_run,
         "serve": cmd_serve,
+        "paper": cmd_paper,
+        "wallet": cmd_wallet,
         "positions": cmd_positions,
     }
     try:

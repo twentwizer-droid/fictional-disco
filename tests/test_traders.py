@@ -41,8 +41,8 @@ def test_trader_stats():
     assert st.profit_factor == 10.0 and abs(st.avg_roi - (5 * 1.0 - 0.5) / 6) < 1e-9
     assert st.avg_win_sol == 1.0 and st.avg_loss_sol == -0.5 and st.worst.mint == "M5"
     assert st.style == "інтрадей"  # 600 s median hold
-    # 0.4*5/6 + 0.3*1 + 0.2*4.5/50 + 0.1*6/30 = 0.6713...
-    assert st.score == 67.1 and st.to_dict()["score"] == 67.1
+    # 0.4*5/6 + 0.3*1 + 0.2*4.5/50 + 0.1*6/30 = 0.6713..., spread over 5 equal wins: no luck cut
+    assert st.score == 67.1 and st.to_dict()["score"] == 67.1 and st.warnings == [] and st.copyable
 
 
 class FakeService:
@@ -141,3 +141,23 @@ def test_same_name_wallets_count_as_one_person():
     assert len(out) == 3
     assert "2 твоїх трейдери" in out[1] and "Також купили" in out[1] and "scharo" in out[1]
     assert out[2].startswith("🔻")
+
+
+def test_averaging_down_and_one_lucky_coin_cut_the_score():
+    w = _addr()
+    s = Store(":memory:")
+    trades = []
+    for i in range(5):  # small steady wins
+        trades += [trade(f"b{i}", f"M{i}", w, "buy", 1.0, 1e6, i, T0 + i * 1000),
+                   trade(f"s{i}", f"M{i}", w, "sell", 1.2, 1e6, i, T0 + i * 1000 + 600)]
+    trades += [trade("bigb", "BIG", w, "buy", 1.0, 1e6, 50, T0 + 9000),
+               trade("bigs", "BIG", w, "sell", 20.0, 1e6, 51, T0 + 9600)]  # one lucky 20x
+    trades += [trade(f"avg{i}", "BAG", w, "buy", 0.5, 1e5, 60 + i, T0 + 10000 + i) for i in range(12)]
+    trades.append(trade("bags", "BAG", w, "sell", 0.4, 12e5, 80, T0 + 20000))
+    s.add_parsed([ParsedTx("x", 0, None, False, "", [], trades=trades)])
+    st = trader_stats(s, w, "Lucky")
+    assert st.averager and st.top_coin_share > 0.9 and not st.copyable
+    assert any("12 разів" in x for x in st.warnings) and any("однієї монети" in x for x in st.warnings)
+    raw = 100 * (0.4 * st.win_rate + 0.3 * min(st.profit_factor, 3) / 3 + 0.2 * min(st.realized_pnl / 50, 1)
+                 + 0.1 * min(len(st.closed) / 30, 1))
+    assert st.score == round(raw * 0.7 * 0.8, 1)

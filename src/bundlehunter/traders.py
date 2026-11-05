@@ -55,6 +55,8 @@ class TokenResult:
     first_buy: float | None = None
     exit_at: float | None = None
     closed: bool = False
+    buys: int = 0
+    sells: int = 0
 
     @property
     def pnl(self) -> float:
@@ -149,13 +151,46 @@ class TraderStats:
         return "холдер"
 
     @property
+    def top_coin_share(self) -> float:
+        """Share of all winnings that came from the single best coin (one lucky hit is not a skill)."""
+        wins = [t.pnl for t in self.closed if t.pnl > 0]
+        return max(wins) / sum(wins) if wins else 0.0
+
+    @property
+    def averager(self) -> bool:
+        """Buys one coin 10+ times and sells once: a copy runs out of money on one coin."""
+        return any(t.buys >= 10 and t.sells <= 1 for t in self.tokens)
+
+    @property
+    def warnings(self) -> list[str]:
+        out = []
+        if self.averager:
+            worst = max(self.tokens, key=lambda t: t.buys)
+            out.append(f"докуповує одну монету {worst.buys} разів і продає раз: копія застрягне")
+        if len(self.closed) >= 5 and self.top_coin_share > 0.4:
+            out.append(f"{self.top_coin_share:.0%} прибутку з однієї монети: може бути удача")
+        if self.style == "бот / снайпер":
+            out.append("виходить за хвилину: за ним не встигнеш")
+        return out
+
+    @property
+    def copyable(self) -> bool:
+        return self.score is not None and self.score >= 60 and not self.averager and self.style != "бот / снайпер"
+
+    @property
     def score(self) -> float | None:
-        """0-100: win rate 40%, profit factor 30%, realized PnL 20%, sample size 10%. None under 5 closed trades."""
+        """0-100: win rate 40%, profit factor 30%, realized PnL 20%, sample size 10%; cut for averaging down
+        (x0.7) and one-coin luck (x0.8). None under 5 closed trades."""
         if len(self.closed) < 5:
             return None
         pf = self.profit_factor or 0.0
-        return round(100 * (0.4 * self.win_rate + 0.3 * min(pf, 3.0) / 3.0
-                            + 0.2 * min(max(self.realized_pnl, 0.0) / 50.0, 1.0) + 0.1 * min(len(self.closed) / 30, 1.0)), 1)
+        base = 100 * (0.4 * self.win_rate + 0.3 * min(pf, 3.0) / 3.0
+                      + 0.2 * min(max(self.realized_pnl, 0.0) / 50.0, 1.0) + 0.1 * min(len(self.closed) / 30, 1.0))
+        if self.averager:
+            base *= 0.7
+        if self.top_coin_share > 0.4:
+            base *= 0.8
+        return round(base, 1)
 
     @property
     def verdict(self) -> str:
@@ -186,6 +221,7 @@ class TraderStats:
             "best": {"mint": self.best.mint, "pnl": round(self.best.pnl, 4)} if self.best else None,
             "worst": {"mint": self.worst.mint, "pnl": round(self.worst.pnl, 4)} if self.worst else None,
             "trades_per_day": round(self.trades_per_day, 2),
+            "warnings": self.warnings, "copyable": self.copyable, "top_coin_share": round(self.top_coin_share, 3),
             "recent": [
                 {"mint": t.mint, "sol_in": round(t.sol_in, 4), "sol_out": round(t.sol_out, 4), "pnl": round(t.pnl, 4),
                  "closed": t.closed, "first_buy": t.first_buy}
@@ -204,10 +240,12 @@ def trader_stats(store: Store, address: str, label: str = "", closed_frac: float
         if t.side == "buy":
             r.sol_in += -t.cash_flow
             r.bought += t.token_amount
+            r.buys += 1
             r.first_buy = r.first_buy or t.block_time
         elif r.bought:  # a sell of something bought inside the window
             r.sol_out += t.cash_flow
             r.sold += t.token_amount
+            r.sells += 1
             if r.exit_at is None and r.sold >= closed_frac * r.bought:
                 r.exit_at = t.block_time
     for r in per.values():
@@ -231,6 +269,7 @@ class SignalEngine:
         self._buys: dict[str, dict[str, float]] = defaultdict(dict)  # mint -> trader -> last buy ts
         self._analyzed: dict[str, float] = {}
         self._sold: set[tuple[str, str]] = set()
+        self.outcomes: list[dict[str, Any]] = []  # every signal: price then, after 5 min, after 1 h
         self._stats: dict[str, tuple[float, TraderStats]] = {}
         self._tasks: set[asyncio.Task] = set()
         self.sent = 0
@@ -266,7 +305,35 @@ class SignalEngine:
 
     # -- inputs -------------------------------------------------------------------------
 
+    def _track(self, ev: MarketEvent) -> None:
+        """Fill in what the price did after each signal (only while the token is streamed)."""
+        if ev.price <= 0:
+            return
+        for o in self.outcomes:
+            if o["mint"] != ev.mint:
+                continue
+            if o["price"] is None:
+                o["price"] = ev.price
+            elif o["p5"] is None and ev.ts - o["ts"] >= 300:
+                o["p5"] = ev.price
+            elif o["p60"] is None and ev.ts - o["ts"] >= 3600:
+                o["p60"] = ev.price
+
+    def _record(self, kind: str, mint: str, ts: float, price: float | None) -> None:
+        self.outcomes.append({"kind": kind, "mint": mint, "ts": ts, "price": price or None, "p5": None, "p60": None})
+        del self.outcomes[:-500]
+
+    def quality(self) -> dict[str, Any]:
+        def stat(key: str) -> dict[str, Any]:
+            moves = [o[key] / o["price"] - 1 for o in self.outcomes if o["price"] and o[key]]
+            if not moves:
+                return {"n": 0, "avg": None, "up_share": None}
+            return {"n": len(moves), "avg": sum(moves) / len(moves), "up_share": sum(m > 0 for m in moves) / len(moves)}
+
+        return {"signals": len(self.outcomes), "after_5m": stat("p5"), "after_1h": stat("p60")}
+
     def on_trade(self, ev: MarketEvent) -> None:
+        self._track(ev)
         if ev.wallet not in self.traders or ev.kind not in ("buy", "sell"):
             return
         sc = self.cfg.signals
@@ -295,6 +362,7 @@ class SignalEngine:
                 mins = (ev.ts - min(others.values())) / 60
                 lines.append("👥 Також купили (за " + f"{mins:.0f} хв): " + ", ".join(e(p) for p in others))
             self._emit("\n".join(lines))
+            self._record("trader_buy", ev.mint, ev.ts, ev.price)
             self._follow_up(ev.mint)
         else:
             bought = any(self._person(w) == me for w in self._buys.get(ev.mint, {}))
@@ -320,6 +388,7 @@ class SignalEngine:
         if traders_in:
             lines.append("📡 Твої трейдери вже тут: " + ", ".join(e(self.traders.get(w) or short(w)) for w in traders_in))
         self._emit("\n".join(lines))
+        self._record("bundle", mint, time.time(), None)
         self._follow_up(mint)
 
     # -- analysis follow-up ---------------------------------------------------------------

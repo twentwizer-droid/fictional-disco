@@ -49,7 +49,7 @@ def run_backtest(store: Store, cfg: Config, split: float = 0.7) -> BacktestResul
     # The live holder panel and LARP check need the state at each moment, which stored data cannot give: off here.
     live_only = {"require_holder_panel": False, "require_larp_check": False}
     strat = Strategy(replace(cfg.strategy, **live_only), index.wallet_to_cluster, black)
-    broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol)
+    broker = PaperBroker(cfg.execution.paper_slippage_pct, cfg.execution.paper_fee_sol, cfg.execution.paper_fee_pct)
     supply = {t["mint"]: t.get("supply") for t in test}
 
     events: list[MarketEvent] = []

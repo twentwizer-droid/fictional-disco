@@ -103,15 +103,21 @@ class StrategyConfig:
 class ExecutionConfig:
     swap_api: str = "https://pumpportal.fun/api/trade-local"  # returns an unsigned tx we sign locally
     pool: str = "auto"
-    slippage_pct: float = 15.0
+    slippage_pct: float = 5.0  # low on purpose: 20-50% slippage gets sandwiched ~18x more often than 1-3%
     priority_fee_sol: float = 0.0005
     use_jito: bool = True
     jito_block_engine: str = "https://mainnet.block-engine.jito.wtf"
     jito_tip_sol: float = 0.001
     also_send_rpc: bool = True  # same signature, cannot land twice; improves landing rate
     confirm_timeout_s: float = 30.0
-    paper_slippage_pct: float = 3.0
-    paper_fee_sol: float = 0.0015  # assumed fee + tip per paper trade
+    paper_slippage_pct: float = 2.0
+    paper_fee_pct: float = 1.25  # pool / platform fee per side (PumpSwap ~1.25%)
+    paper_fee_sol: float = 0.0007  # priority fee + tip per paper trade
+    paper_start_sol: float = 1.0  # first paper balance (bh paper reset / deposit to change)
+    # sizing and hard limits, paper and live
+    max_stake_pct: float = 0.25  # one trade <= 25% of the free balance
+    reserve_sol: float = 0.02  # always left for fees
+    live_max_total_loss_sol: float = 1.0  # all-time live loss at which live buying stops for good
 
 
 @dataclass
@@ -182,6 +188,20 @@ class ScalpConfig:
     stop_loss_pct: float = 0.15
     trailing_pct: float = 0.10  # once half of the take profit is reached
     max_hold_s: float = 600.0
+    # exit mode: "smart" (TP1 part -> break-even -> trailing ladder), "never_lose" (no red exit once
+    # break-even is locked; before that only an emergency stop), "fixed" (all-or-nothing TP / SL)
+    exit_mode: str = "smart"
+    round_trip_cost_pct: float = 0.06  # fees + slippage both ways; paper uses the broker's real figure
+    min_tp_cost_multiple: float = 3.0  # take profit is never below 3x the costs (a +12% TP on 3.3% costs bleeds)
+    tp1_fraction: float = 0.5  # share sold at TP1: gets the stake back, the rest runs for free
+    stop_confirm_s: float = 4.0  # price must stay under the stop this long: no wick-outs...
+    emergency_stop_pct: float = 0.30  # ...except a crash this deep: out at once
+    runner_trail_pct: float = 0.25  # wider trailing once the trade has doubled
+    never_lose_arm_pct: float = 0.10  # never_lose: profit beyond costs that locks break-even
+    never_lose_max_wait_s: float = 1800.0  # never_lose: still under water after 30 min -> exit anyway
+    # fake-pump filters
+    staircase_veto: bool = True  # even buys in steps, no sells, no wicks = a painted chart
+    dump_into_smart_veto_pct: float = 0.30  # bundle/insiders already sold 30% when smart wallets buy = two-step setup
     # 4. leave when the idea stops working
     exit_sell_pressure: float = 1.5  # sells outweigh buys 1.5x in the window
     exit_on_smart_sell: bool = True

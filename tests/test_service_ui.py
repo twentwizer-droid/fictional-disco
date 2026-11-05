@@ -267,3 +267,13 @@ def test_telegram_imports_a_wallet_file():
     report = sent.messages[-1][1]
     assert "Додано в стеження: <b>1</b>" in report and "біржа (CEX): 1" in report and "Yugi (1)" in report
     assert [t["address"] for t in svc.store.traders()] == [w1] and svc.signals.traders == {w1: "Alpha 120k"}
+
+
+def test_telegram_paper_commands():
+    svc = _service()
+    bot, sent = _bot(svc)
+    for text in ("/paper", "/paper deposit 1.5", "/paper reset 2", "/paper withdraw 0.5", "/paper deposit x"):
+        asyncio.run(bot.handle({"chat": {"id": 42}, "from": {"id": 42}, "text": text}))
+    texts = [t for _, t in sent.messages]
+    assert "1.0000 SOL" in texts[0] and "2.5000 SOL" in texts[1] and "2.0000 SOL" in texts[2]
+    assert "1.5000 SOL" in texts[3] and "приклад" in texts[4]

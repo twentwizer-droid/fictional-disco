@@ -55,6 +55,7 @@ HELP = """<b>bundlehunter</b> 🤖
 <b>/rank</b> [скільки] — завантажити історію і відсортувати трейдерів за реальним PnL
 
 <b>/scalp</b> — скальпінг: стан, що чекає підтвердження, які угоди пропущено і чому
+<b>/paper</b> [deposit|withdraw|reset сума] — паперовий баланс
 
 Можна просто надіслати адресу токена або слова наратива."""
 
@@ -192,6 +193,12 @@ def fmt_status(s: dict[str, Any]) -> str:
         f"PnL: paper {s['realized_pnl_sol']['paper']:+.4f} SOL · live {s['realized_pnl_sol']['live']:+.4f} SOL",
         f"Твоїх трейдерів: {s.get('traders', 0)} · сигналів надіслано: {s.get('signals_sent', 0)}",
     ]
+    if s.get("paper"):
+        lines.append(f"Паперовий баланс: {s['paper']['balance_sol']:.4f} SOL · режим виходу: {s.get('exit_mode', '-')}")
+    q = s.get("signal_quality") or {}
+    a5 = (q.get("after_5m") or {})
+    if a5.get("n"):
+        lines.append(f"Якість сигналів: через 5 хв у середньому {a5['avg']:+.0%}, росли {a5['up_share']:.0%} (n={a5['n']})")
     if s["watching"]:
         lines += ["", "<b>Зараз стежу</b>"]
         for w in s["watching"][:10]:
@@ -433,6 +440,19 @@ class TelegramBot:
                 raise ValueError("додай гаманець: /trader <гаманець>")
             await self.send(chat_id, "⏳ Рахую PnL гаманця…")
             await self.send(chat_id, fmt_trader(await self.service.trader(arg)))
+        elif cmd == "/paper":
+            action, _, amount = arg.partition(" ")
+            action = {"поповнити": "deposit", "deposit": "deposit", "вивести": "withdraw", "withdraw": "withdraw",
+                      "скинути": "reset", "reset": "reset"}.get(action.lower(), "")
+            try:
+                value = float(amount.replace(",", ".")) if action and amount.strip() else 0.0
+            except ValueError:
+                value = -1.0
+            if action and value <= 0:
+                raise ValueError("приклад: /paper deposit 1.5  ·  /paper reset 2  ·  /paper withdraw 0.5")
+            bal = self.service.paper(action, value)
+            await self.send(chat_id, f"📝 Паперовий баланс: <b>{bal:.4f} SOL</b>\n"
+                                     "Змінити: /paper deposit 1 · /paper withdraw 0.5 · /paper reset 2")
         elif cmd == "/scalp":
             await self.send(chat_id, fmt_scalp(self.service.status().get("scalp")))
         elif cmd == "/positions":

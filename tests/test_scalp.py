@@ -16,7 +16,8 @@ def crowd(s, start, price, n=6, sol=0.8, step=1.0):
     """n retail buyers: volume and new buyers confirm the move."""
     out = []
     for i in range(n):
-        out += s.on_event(ev("buy", f"r{start}_{i}", price * (1 + 0.01 * i), start + i * step, sol))
+        size = sol * (0.6 + 0.15 * (i % 5))  # real crowds buy different amounts
+        out += s.on_event(ev("buy", f"r{start}_{i}", price * (1 + 0.01 * i), start + i * step, size))
     return out
 
 
@@ -33,7 +34,7 @@ def test_no_reason_no_watch():
 
 
 def test_strong_wallet_plus_volume_confirmation_enters_with_plan():
-    s = ScalpStrategy(ScalpConfig(buy_sol=0.1), TRADERS)
+    s = ScalpStrategy(ScalpConfig(buy_sol=0.1, exit_mode="fixed"), TRADERS)
     s.on_event(ev("buy", "strong", 1e-6, 0))
     assert s.drain_new_watches() == [M]
     ready(s)
@@ -78,7 +79,7 @@ def test_no_chasing_and_no_vertical_candle():
 
 def test_exits_take_profit_stop_trailing_momentum_smart_sell_time():
     def opened(**cfg):
-        s = ScalpStrategy(ScalpConfig(**cfg), TRADERS)
+        s = ScalpStrategy(ScalpConfig(**{"exit_mode": "fixed", **cfg}), TRADERS)
         s.on_event(ev("buy", "strong", 1e-6, 0))
         ready(s)
         (buy,) = crowd(s, 1, 1e-6)

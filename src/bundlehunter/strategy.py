@@ -43,6 +43,7 @@ class Action:
     sol_amount: float = 0.0  # buys
     token_amount: float = 0.0  # sells
     strategy: str = "bundle"  # which strategy gets the fill
+    fraction: float = 1.0  # sells: share of the position (partial take profit < 1)
 
 
 @dataclass

@@ -113,6 +113,10 @@ loaders.overview = async function () {
       card("PnL paper, SOL", signed(s.realized_pnl_sol.paper, 3), pnlClass(s.realized_pnl_sol.paper)),
       card("PnL live, SOL", signed(s.realized_pnl_sol.live, 3), pnlClass(s.realized_pnl_sol.live)),
       card("Трейдерів / сигналів", `${s.traders ?? 0} / ${s.signals_sent ?? 0}`),
+      ...(s.paper ? [card("Паперовий баланс, SOL", s.paper.balance_sol.toFixed(4))] : []),
+      ...(s.signal_quality && s.signal_quality.after_5m.n ? [card("Сигнали через 5 хв",
+        `${signed(s.signal_quality.after_5m.avg * 100, 0)}% · ріст ${pct(s.signal_quality.after_5m.up_share, 0)}`,
+        pnlClass(s.signal_quality.after_5m.avg))] : []),
       card("Працює", `${(s.uptime_s / 3600).toFixed(1)} год`),
     );
     $("watching").replaceChildren(table(

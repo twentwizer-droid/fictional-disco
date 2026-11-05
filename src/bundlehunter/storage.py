@@ -86,6 +86,20 @@ CREATE TABLE IF NOT EXISTS traders (
     added_at REAL
 );
 
+-- paper money: one balance, every movement logged
+CREATE TABLE IF NOT EXISTS paper_account (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    balance REAL NOT NULL,
+    updated_at REAL
+);
+CREATE TABLE IF NOT EXISTS paper_ledger (
+    ts REAL NOT NULL,
+    kind TEXT NOT NULL,      -- deposit | withdraw | reset | buy | sell
+    amount REAL NOT NULL,    -- + in, - out
+    balance REAL NOT NULL,
+    note TEXT
+);
+
 CREATE TABLE IF NOT EXISTS positions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mint TEXT NOT NULL,
@@ -145,7 +159,7 @@ class Store:
         # token metadata for the LARP check; links are stored normalized (see larp.norm_link)
         "tokens": {c: "TEXT" for c in ("uri", "description", "image", "twitter", "telegram", "website")}
         | {"meta_at": "REAL"},
-        "positions": {"strategy": "TEXT NOT NULL DEFAULT 'bundle'"},
+        "positions": {"strategy": "TEXT NOT NULL DEFAULT 'bundle'", "partial_sol": "REAL NOT NULL DEFAULT 0"},
     }
     _LINK_COLUMNS = ("uri", "image", "twitter", "telegram", "website")
 
@@ -343,6 +357,39 @@ class Store:
 
     def traders(self) -> list[dict[str, Any]]:
         return [dict(r) for r in self.db.execute("SELECT * FROM traders ORDER BY added_at")]
+
+    # -- paper account ---------------------------------------------------------
+
+    def paper_balance(self, default: float | None = None) -> float:
+        row = self.db.execute("SELECT balance FROM paper_account WHERE id = 1").fetchone()
+        if row is None:
+            if default is None:
+                return 0.0
+            self.paper_move("reset", default, "first paper balance", absolute=True)
+            return default
+        return float(row["balance"])
+
+    def paper_move(self, kind: str, amount: float, note: str = "", absolute: bool = False) -> float:
+        """Change the paper balance (absolute=True sets it). Returns the new balance."""
+        row = self.db.execute("SELECT balance FROM paper_account WHERE id = 1").fetchone()
+        old = float(row["balance"]) if row else 0.0
+        new = amount if absolute else old + amount
+        self.db.execute(
+            "INSERT INTO paper_account(id, balance, updated_at) VALUES (1, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET balance = excluded.balance, updated_at = excluded.updated_at",
+            (new, time.time()),
+        )
+        self.db.execute("INSERT INTO paper_ledger VALUES (?,?,?,?,?)", (time.time(), kind, new - old, new, note))
+        self.db.commit()
+        return new
+
+    def paper_ledger(self, limit: int = 50) -> list[dict[str, Any]]:
+        rows = self.db.execute("SELECT * FROM paper_ledger ORDER BY ts DESC LIMIT ?", (limit,))
+        return [dict(r) for r in rows]
+
+    def live_realized_pnl(self) -> float:
+        row = self.db.execute("SELECT COALESCE(SUM(pnl_sol), 0) FROM positions WHERE live = 1 AND closed_at IS NOT NULL")
+        return float(row.fetchone()[0])
 
     # -- bot positions ---------------------------------------------------------
 

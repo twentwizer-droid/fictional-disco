@@ -212,6 +212,8 @@ class Service:
             "traders": len(self.signals.traders),
             "scalp": None,
             "signals_sent": self.signals.sent,
+            "signal_quality": self.signals.quality(),
+            "paper": None,
             "watching": [],
             "tracked_wallets": 0,
         }
@@ -220,6 +222,9 @@ class Service:
             out["mode"] = "live" if self.runner.broker.live else "paper"
             out["tracked_wallets"] = len(strat.tracked_wallets())
             out["scalp"] = self.runner.scalper.status(time.time()) if self.runner.scalper else None
+            if not self.runner.broker.live:
+                out["paper"] = {"balance_sol": self.store.paper_balance(), "ledger": self.store.paper_ledger(10)}
+            out["exit_mode"] = self.cfg.scalp.exit_mode
             out["watching"] = [
                 {
                     "mint": w.mint,
@@ -234,7 +239,21 @@ class Service:
             ]
         return out
 
-    # -- your traders ---------------------------------------------------------------
+    # -- paper money ----------------------------------------------------------------
+
+    def paper(self, action: str = "", amount: float = 0.0) -> float:
+        """'' -> balance; deposit / withdraw / reset (sets the balance)."""
+        if self.runner is not None and self.runner.broker.live:
+            raise ValueError("бот у LIVE-режимі: паперовий рахунок зараз не використовується")
+        if action == "deposit":
+            return self.store.paper_move("deposit", abs(amount), "manual")
+        if action == "withdraw":
+            return self.store.paper_move("withdraw", -abs(amount), "manual")
+        if action == "reset":
+            return self.store.paper_move("reset", abs(amount), "manual", absolute=True)
+        return self.store.paper_balance(default=self.cfg.execution.paper_start_sol)
+
+        # -- your traders ---------------------------------------------------------------
 
     async def add_trader(self, address: str, label: str = "") -> TraderStats:
         """Add to the watchlist, start streaming its trades, load its history for PnL stats."""

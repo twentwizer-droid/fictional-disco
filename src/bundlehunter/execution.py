@@ -51,44 +51,93 @@ class Broker(Protocol):
 
     async def buy(self, mint: str, sol_amount: float, ref_price: float) -> Fill | None: ...
 
-    async def sell(self, mint: str, token_amount: float, ref_price: float) -> Fill | None: ...
+    async def sell(self, mint: str, token_amount: float, ref_price: float, fraction: float = 1.0) -> Fill | None: ...
 
 
 class PaperBroker:
-    """Simulated fills at the reference price minus an assumed slippage and fee."""
+    """Simulated fills with realistic costs, paid from a paper balance.
+
+    Costs per side: pool fee (fee_pct of the trade), fixed priority fee + tip (fee_sol) and
+    slippage on the price. With a store, every buy is paid from the paper balance and refused if
+    the balance is short; sells pay into it. Without a store (backtests) money is unlimited.
+    """
 
     live = False
 
-    def __init__(self, slippage_pct: float = 3.0, fee_sol: float = 0.0015) -> None:
+    def __init__(self, slippage_pct: float = 3.0, fee_sol: float = 0.0015, fee_pct: float = 0.0,
+                 store: Any = None, start_balance: float = 1.0) -> None:
         self.slip = slippage_pct / 100
         self.fee = fee_sol
+        self.fee_pct = fee_pct / 100
+        self.store = store
+        if store is not None:
+            store.paper_balance(default=start_balance)
+
+    def balance(self) -> float | None:
+        return self.store.paper_balance() if self.store is not None else None
+
+    def round_trip_cost_pct(self, size_sol: float) -> float:
+        """What a buy + sell costs before the price moves at all, as a fraction of the stake."""
+        fixed = 2 * self.fee / size_sol if size_sol > 0 else 0.0
+        return 2 * self.fee_pct + 2 * self.slip + fixed
 
     def fill_buy(self, mint: str, sol_amount: float, ref_price: float, ts: float | None = None) -> Fill:
         price = ref_price * (1 + self.slip)
-        return Fill("buy", mint, price, sol_amount / price, sol_amount + self.fee, "paper", ts or time.time())
+        spent = sol_amount * (1 + self.fee_pct) + self.fee
+        return Fill("buy", mint, price, sol_amount / price, spent, "paper", ts or time.time())
 
     def fill_sell(self, mint: str, token_amount: float, ref_price: float, ts: float | None = None) -> Fill:
         price = ref_price * (1 - self.slip)
-        return Fill("sell", mint, price, token_amount, token_amount * price - self.fee, "paper", ts or time.time())
+        got = token_amount * price * (1 - self.fee_pct) - self.fee
+        return Fill("sell", mint, price, token_amount, got, "paper", ts or time.time())
 
     async def buy(self, mint: str, sol_amount: float, ref_price: float) -> Fill | None:
-        return self.fill_buy(mint, sol_amount, ref_price)
+        fill = self.fill_buy(mint, sol_amount, ref_price)
+        if self.store is not None:
+            if self.store.paper_balance() < fill.sol:
+                log.info("paper: balance too low for %.4f SOL", fill.sol)
+                return None
+            self.store.paper_move("buy", -fill.sol, mint)
+        return fill
 
-    async def sell(self, mint: str, token_amount: float, ref_price: float) -> Fill | None:
-        return self.fill_sell(mint, token_amount, ref_price)
+    async def sell(self, mint: str, token_amount: float, ref_price: float, fraction: float = 1.0) -> Fill | None:
+        fill = self.fill_sell(mint, token_amount, ref_price)
+        if self.store is not None:
+            self.store.paper_move("sell", fill.sol, mint)
+        return fill
+
+
+WALLET_FILE = "data/wallet.key"  # written by `bh wallet set`, owner-only permissions, never committed
 
 
 def load_keypair() -> Any:
-    """Keypair from BH_PRIVATE_KEY (base58) or BH_KEYPAIR_PATH (solana-keygen JSON)."""
+    """Keypair from BH_PRIVATE_KEY (base58), BH_KEYPAIR_PATH (solana-keygen JSON) or data/wallet.key."""
     from solders.keypair import Keypair
 
     if os.environ.get("BH_PRIVATE_KEY"):
         return Keypair.from_base58_string(os.environ["BH_PRIVATE_KEY"].strip())
-    path = os.environ.get("BH_KEYPAIR_PATH")
+    path = os.environ.get("BH_KEYPAIR_PATH") or (WALLET_FILE if os.path.exists(WALLET_FILE) else "")
     if path:
         with open(path) as fh:
             return Keypair.from_bytes(bytes(json.load(fh)))
-    raise ExecutionError("live trading needs BH_PRIVATE_KEY or BH_KEYPAIR_PATH (use a dedicated hot wallet)")
+    raise ExecutionError("live trading needs a wallet: run `bh wallet set` (use a dedicated hot wallet)")
+
+
+def save_keypair(secret: str, path: str = WALLET_FILE) -> str:
+    """Validate a base58 secret key or a JSON byte array and store it owner-only. Returns the address."""
+    from solders.keypair import Keypair
+
+    secret = secret.strip()
+    kp = Keypair.from_bytes(bytes(json.loads(secret))) if secret.startswith("[") else Keypair.from_base58_string(secret)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(list(bytes(kp)), fh)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return str(kp.pubkey())
 
 
 class LiveBroker:
@@ -197,5 +246,10 @@ class LiveBroker:
     async def buy(self, mint: str, sol_amount: float, ref_price: float) -> Fill | None:
         return await self._execute("buy", mint, sol_amount, True)
 
-    async def sell(self, mint: str, token_amount: float, ref_price: float) -> Fill | None:
-        return await self._execute("sell", mint, "100%", False)  # whole bag, no dust left behind
+    async def sell(self, mint: str, token_amount: float, ref_price: float, fraction: float = 1.0) -> Fill | None:
+        # a percentage of the wallet's tokens: "100%" leaves no dust; partial takes sell their share
+        pct = "100%" if fraction >= 0.999 else f"{max(1, round(fraction * 100))}%"
+        return await self._execute("sell", mint, pct, False)
+
+    async def balance_sol(self) -> float:
+        return await self.rpc.get_balance(self.pubkey) / LAMPORTS_PER_SOL

@@ -102,7 +102,7 @@ class ScalpPosition:
     entry_ts: float
     size_sol: float
     tokens: float
-    tp: float
+    tp: float  # take profit (TP1 in smart / never_lose)
     sl: float
     trail: float
     max_hold_s: float
@@ -112,18 +112,37 @@ class ScalpPosition:
     position_id: int | None = None
     closing: bool = False
     cluster_id: str = "scalp"
+    mode: str = "fixed"
+    cost: float = 0.0  # round-trip costs as a fraction of the stake
+    stop_price: float = 0.0  # absolute; only ever moves up
+    tp1_done: bool = False
+    armed: bool = False  # never_lose: break-even locked
+    realized_sol: float = 0.0  # proceeds of partial sells
+    below_since: float | None = None
+
+    @property
+    def be_price(self) -> float:
+        """Price at which closing gives back the stake including costs."""
+        return self.entry_price * (1 + self.cost)
 
     @property
     def plan(self) -> str:
-        return (f"TP +{self.tp:.0%}, стоп −{self.sl:.0%}, трейлінг {self.trail:.0%} після +{self.tp / 2:.0%}, "
-                f"макс {self.max_hold_s / 60:.0f} хв")
+        if self.mode == "fixed":
+            return (f"TP +{self.tp:.0%}, стоп −{self.sl:.0%}, трейлінг {self.trail:.0%} після +{self.tp / 2:.0%}, "
+                    f"макс {self.max_hold_s / 60:.0f} хв")
+        head = "never lose: до беззбитку лише аварійний стоп, " if self.mode == "never_lose" else f"стоп −{self.sl:.0%}, "
+        return (f"{head}TP1 +{self.tp:.0%} продаю частину й ставлю стоп у беззбиток, далі трейлінг {self.trail:.0%}; "
+                f"витрати на коло ~{self.cost:.1%}")
 
 
 class ScalpStrategy:
     name = "scalp"
 
     def __init__(self, cfg: ScalpConfig, traders: dict[str, tuple[str, float | None]] | None = None) -> None:
+        if cfg.exit_mode not in ("smart", "never_lose", "fixed"):
+            raise ValueError(f"scalp.exit_mode must be smart / never_lose / fixed, got {cfg.exit_mode!r}")
         self.cfg = cfg
+        self.cost_model = None  # size_sol -> round-trip cost fraction (the paper broker's real figure)
         self.traders: dict[str, tuple[str, float | None]] = dict(traders or {})  # wallet -> (person, score)
         self.watches: dict[str, ScalpWatch] = {}
         self.positions: dict[str, ScalpPosition] = {}
@@ -281,6 +300,13 @@ class ScalpStrategy:
             w.block_reason = risk
             return []
 
+        held, initial = m.get("linked_pct"), m.get("linked_initial_pct")
+        if held is not None and initial and initial >= 0.05 and held < initial * (1 - cfg.dump_into_smart_veto_pct):
+            return self._finish(w, f"бандл та інсайдери вже продали {1 - held / initial:.0%} своїх токенів: "
+                                   "схоже на двохідку під копітрейдерів", skipped=True)
+        if cfg.staircase_veto and self.staircase(w, now):
+            w.block_reason = "штучний графік: рівні покупки сходинкою без продажів"
+            return []
         # 1. reason: who is in
         strong = [p for p, (_, _, sc) in w.smart.items() if sc >= cfg.strong_trader_score]
         if not strong and len(w.smart) < cfg.min_smart_wallets:
@@ -308,35 +334,102 @@ class ScalpStrategy:
                   f"{mo.buyers} покупців за {cfg.momentum_window_s:.0f} с")
         return [Action("buy", w.mint, w.last_price, reason, "scalp", sol_amount=cfg.buy_sol, strategy=self.name)]
 
+    def staircase(self, w: ScalpWatch, now: float) -> bool:
+        """Painted chart: >=8 recent trades, >=90% buys, 80% of them within 10% of one size, price only stepping up."""
+        recent = [t for t in w.trades if now - t[0] <= self.cfg.momentum_window_s][-20:]
+        if len(recent) < 8:
+            return False
+        buys = [t for t in recent if t[1] == "buy"]
+        if len(buys) < 0.9 * len(recent):
+            return False
+        sizes = sorted(t[2] for t in buys)
+        med = sizes[len(sizes) // 2]
+        same_size = sum(1 for x in sizes if abs(x - med) <= 0.1 * med) >= 0.8 * len(sizes)
+        prices = [t[4] for t in recent]
+        ups = sum(1 for a, b in zip(prices, prices[1:], strict=False) if b >= a)
+        return same_size and ups >= 0.9 * (len(prices) - 1)
+
+    def cost_for(self, size_sol: float) -> float:
+        return self.cost_model(size_sol) if self.cost_model else self.cfg.round_trip_cost_pct
+
     def take_profit_for(self, size_sol: float) -> float:
         cfg = self.cfg
         k = min(max(size_sol / cfg.size_for_min_tp_sol, 0.0), 1.0) if cfg.size_for_min_tp_sol > 0 else 1.0
-        return cfg.take_profit_max_pct - (cfg.take_profit_max_pct - cfg.take_profit_min_pct) * k
+        tp = cfg.take_profit_max_pct - (cfg.take_profit_max_pct - cfg.take_profit_min_pct) * k
+        return max(tp, cfg.min_tp_cost_multiple * self.cost_for(size_sol))
+
+    def _sell(self, pos: ScalpPosition, price: float, reason: str, fraction: float = 1.0) -> list[Action]:
+        pos.closing = True
+        return [Action("sell", pos.mint, price, reason, "scalp", token_amount=pos.tokens * fraction,
+                       strategy=self.name, fraction=fraction)]
 
     def _exits(self, w: ScalpWatch, pos: ScalpPosition, now: float) -> list[Action]:
         if pos.closing or w.last_price <= 0:
             return []
         cfg, p, e = self.cfg, w.last_price, pos.entry_price
         pos.high = max(pos.high, p)
-        reason = ""
-        if p >= e * (1 + pos.tp):
-            reason = f"тейк-профіт +{p / e - 1:.0%} за планом"
-        elif p <= e * (1 - pos.sl):
-            reason = f"стоп-лос {p / e - 1:.0%}: ідея не спрацювала"
-        elif pos.high >= e * (1 + pos.tp / 2) and p <= pos.high * (1 - pos.trail):
-            reason = f"трейлінг: −{1 - p / pos.high:.0%} від максимуму, фіксую {p / e - 1:+.0%}"
-        elif cfg.exit_on_smart_sell and pos.persons & w.smart_sold:
-            reason = "сильні гаманці продають: виходжу разом з ними"
+        # always: a crash is a crash, whatever the mode
+        if p <= e * (1 - cfg.emergency_stop_pct):
+            return self._sell(pos, p, f"аварійний стоп {p / e - 1:.0%}: обвал, не чекаю")
+        if pos.mode == "fixed":
+            return self._exits_fixed(w, pos, now)
+
+        mo = w.momentum(now, cfg.momentum_window_s)
+        dying = mo.sell_sol >= cfg.min_buy_volume_sol / 2 and mo.sell_sol >= cfg.exit_sell_pressure * max(mo.buy_sol, 1e-9)
+        smart_out = cfg.exit_on_smart_sell and bool(pos.persons & w.smart_sold)
+        above_be = p >= pos.be_price
+        # never_lose: the thesis exits only fire when they don't lock in a loss
+        if pos.mode == "smart" or above_be:
+            if smart_out:
+                return self._sell(pos, p, "сильні гаманці продають: виходжу разом з ними")
+            if dying:
+                return self._sell(pos, p, f"обсяг згас: продажі {mo.sell_sol:.1f} SOL проти купівель {mo.buy_sol:.1f}")
+
+        # break-even lock for never_lose
+        if pos.mode == "never_lose" and not pos.armed and p >= e * (1 + pos.cost + cfg.never_lose_arm_pct):
+            pos.armed = True
+            pos.stop_price = max(pos.stop_price, pos.be_price)
+        # TP1: sell a part, the rest rides on house money
+        if not pos.tp1_done and p >= e * (1 + pos.tp):
+            pos.stop_price = max(pos.stop_price, pos.be_price)
+            return self._sell(pos, p, f"TP1 +{p / e - 1:.0%}: продаю {cfg.tp1_fraction:.0%}, стоп у беззбиток",
+                              fraction=cfg.tp1_fraction)
+        # trailing ladder once in profit: tighter early, wider after a double
+        if pos.tp1_done or pos.armed:
+            trail = cfg.runner_trail_pct if pos.high >= 2 * e else pos.trail
+            pos.stop_price = max(pos.stop_price, pos.high * (1 - trail), pos.be_price)
+        # stop, confirmed by time so one wick does not knock us out
+        if pos.stop_price and p <= pos.stop_price:
+            pos.below_since = pos.below_since or now
+            if now - pos.below_since >= cfg.stop_confirm_s:
+                kind = "трейлінг" if pos.stop_price >= pos.be_price else "стоп-лос"
+                return self._sell(pos, p, f"{kind}: ціна {p / e - 1:+.0%} трималась під стопом {cfg.stop_confirm_s:.0f} с")
         else:
-            mo = w.momentum(now, cfg.momentum_window_s)
-            if mo.sell_sol >= cfg.min_buy_volume_sol / 2 and mo.sell_sol >= cfg.exit_sell_pressure * max(mo.buy_sol, 1e-9):
-                reason = f"обсяг згас: продажі {mo.sell_sol:.1f} SOL проти купівель {mo.buy_sol:.1f}"
-            elif now - pos.entry_ts >= pos.max_hold_s:
-                reason = f"час вийшов ({pos.max_hold_s / 60:.0f} хв), рух не підтвердився"
-        if not reason:
-            return []
-        pos.closing = True
-        return [Action("sell", pos.mint, p, reason, "scalp", token_amount=pos.tokens, strategy=self.name)]
+            pos.below_since = None
+        # time
+        held = now - pos.entry_ts
+        if pos.mode == "smart" and not pos.tp1_done and held >= pos.max_hold_s:
+            return self._sell(pos, p, f"час вийшов ({pos.max_hold_s / 60:.0f} хв): рух не підтвердився")
+        if pos.mode == "never_lose" and not pos.armed and held >= cfg.never_lose_max_wait_s:
+            return self._sell(pos, p, f"never lose: чекав {held / 60:.0f} хв, беззбиток не прийшов, виходжу {p / e - 1:+.0%}")
+        return []
+
+    def _exits_fixed(self, w: ScalpWatch, pos: ScalpPosition, now: float) -> list[Action]:
+        cfg, p, e = self.cfg, w.last_price, pos.entry_price
+        if p >= e * (1 + pos.tp):
+            return self._sell(pos, p, f"тейк-профіт +{p / e - 1:.0%} за планом")
+        if p <= e * (1 - pos.sl):
+            return self._sell(pos, p, f"стоп-лос {p / e - 1:.0%}: ідея не спрацювала")
+        if pos.high >= e * (1 + pos.tp / 2) and p <= pos.high * (1 - pos.trail):
+            return self._sell(pos, p, f"трейлінг: −{1 - p / pos.high:.0%} від максимуму, фіксую {p / e - 1:+.0%}")
+        if cfg.exit_on_smart_sell and pos.persons & w.smart_sold:
+            return self._sell(pos, p, "сильні гаманці продають: виходжу разом з ними")
+        mo = w.momentum(now, cfg.momentum_window_s)
+        if mo.sell_sol >= cfg.min_buy_volume_sol / 2 and mo.sell_sol >= cfg.exit_sell_pressure * max(mo.buy_sol, 1e-9):
+            return self._sell(pos, p, f"обсяг згас: продажі {mo.sell_sol:.1f} SOL проти купівель {mo.buy_sol:.1f}")
+        if now - pos.entry_ts >= pos.max_hold_s:
+            return self._sell(pos, p, f"час вийшов ({pos.max_hold_s / 60:.0f} хв), рух не підтвердився")
+        return []
 
     def _finish(self, w: ScalpWatch, reason: str, skipped: bool = False) -> list[Action]:
         w.done_reason = reason
@@ -355,7 +448,10 @@ class ScalpStrategy:
         w.pending = False
         cfg = self.cfg
         pos = ScalpPosition(mint, price, ts, sol_spent, tokens, self.take_profit_for(sol_spent), cfg.stop_loss_pct,
-                            cfg.trailing_pct, cfg.max_hold_s, set(w.smart), reason, price, position_id)
+                            cfg.trailing_pct, cfg.max_hold_s, set(w.smart), reason, price, position_id,
+                            mode=cfg.exit_mode, cost=self.cost_for(sol_spent))
+        if cfg.exit_mode == "smart":
+            pos.stop_price = price * (1 - cfg.stop_loss_pct)
         self.positions[mint] = pos
         self.entries.append(ts)
         return pos
@@ -366,9 +462,16 @@ class ScalpStrategy:
             w.pending = False
             self._finish(w, "купівля не вдалася")
 
+    def on_partial_filled(self, mint: str, price: float, sol_received: float, tokens_sold: float, ts: float) -> None:
+        pos = self.positions[mint]
+        pos.tokens -= tokens_sold
+        pos.realized_sol += sol_received
+        pos.tp1_done = True
+        pos.closing = False
+
     def on_sell_filled(self, mint: str, price: float, sol_received: float, ts: float, reason: str) -> float:
         pos = self.positions.pop(mint)
-        pnl = sol_received - pos.size_sol
+        pnl = pos.realized_sol + sol_received - pos.size_sol
         self.realized_by_day[_day(ts)] += pnl
         if pnl < 0:
             self.loss_streak += 1

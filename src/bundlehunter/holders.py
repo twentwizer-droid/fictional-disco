@@ -70,6 +70,7 @@ class TokenPanel:
     def metrics(self) -> dict[str, float | None]:
         m = {f"{g}_pct": self.pct(self.groups[g].held) for g in GROUPS}
         m["top10_pct"] = self.pct(sum(a for _, a in self.top10)) if self.top10 is not None else None
+        m["linked_initial_pct"] = self.pct(self.groups["linked"].initial)
         return m
 
 

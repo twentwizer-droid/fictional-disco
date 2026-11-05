@@ -1,5 +1,6 @@
 # bundlehunter
 
+> **Мануал по запуску и работе (русский): [docs/MANUAL_RU.md](docs/MANUAL_RU.md)**  
 > **Інструкція українською для запуску без програмування: [docs/START_UA.md](docs/START_UA.md)**
 > (сервер, Telegram-бот, веб-панель, крок за кроком).
 
@@ -79,7 +80,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,ai]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 80 offline tests
+pytest                      # 94 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -332,6 +333,19 @@ Bulk import: send an Axiom / GMGN wallet-tracker export to the Telegram bot, or 
 - `/rank` (or `bh trader rank`) then loads their history and orders them by real PnL.
 - Wallets sharing a name count as one person in signals.
 - `--seed-bundles N` analyzes the launches of named bundle groups (`walletsort.py`).
+
+### Exit modes, paper money, real wallet
+
+- `exit_mode = "smart"`: time-confirmed stop, -30% emergency stop, TP1 sells half and moves the stop to
+  break-even, then a trailing ladder (10%, 25% after a double).
+- `"never_lose"`: no ordinary stop until break-even is locked (costs + 10%); after that it never closes red.
+  The emergency stop and a 30-minute wait limit stay, because a rug is still a rug.
+- `"fixed"`: all-or-nothing.
+- Take profit is never below 3x the round-trip costs.
+- Paper trading pays real costs from a paper balance (`bh paper` / `/paper deposit|withdraw|reset`).
+- The stake is capped at 25% of the free balance.
+- A real wallet: `bh wallet set` (hidden input, owner-only file), `--live` + `BH_LIVE_TRADING=1`, and an
+  all-time live loss cap.
 
 ### Scalping strategy (`[scalp]`)
 

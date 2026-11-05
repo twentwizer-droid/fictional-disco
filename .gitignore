@@ -13,3 +13,4 @@ config.toml
 .pytest_cache/
 desk/logs/
 desk/*.db*
+wallet.key
