@@ -25,6 +25,7 @@ from .narrative import Member, NarrativeAnalyzer, Query, family_to_dict, parse_q
 from .rpc import SolanaRpc
 from .storage import Store
 from .traders import SignalEngine, TraderStats
+from .walletsort import FOLLOW, SortResult, load, merge
 
 if TYPE_CHECKING:
     from .runner import BotRunner
@@ -252,6 +253,35 @@ class Service:
             self.runner.extra_accounts.discard(address.strip())
             await self.runner.refresh_accounts()
         return ok
+
+    async def import_wallets(self, paths: list[str], categories: tuple[str, ...] = FOLLOW) -> tuple[SortResult, int]:
+        """Sort wallet-tracker exports and add the ones worth following to the watchlist."""
+        result = merge(load(p) for p in paths)
+        added = 0
+        for w in result.wallets:
+            if w.category in categories:
+                self.store.add_trader(w.address, w.label)
+                added += 1
+        self.signals.load()
+        if self.runner is not None:
+            self.runner.extra_accounts |= set(self.signals.traders)
+            await self.runner.refresh_accounts()
+        return result, added
+
+    async def rank_traders(self, limit: int = 50, max_txs: int = 150) -> list[TraderStats]:
+        """Load the history of up to `limit` traders that have none yet, then sort everyone by real PnL."""
+        todo = [t["address"] for t in self.store.traders() if not self.store.wallet(t["address"])][:limit]
+
+        async def one(address: str) -> None:
+            async with self._sem:
+                try:
+                    await self.analyzer.profile_wallet(address, max_txs=max_txs)
+                except Exception as exc:
+                    log.warning("rank %s: %s", address, exc)
+
+        await asyncio.gather(*(one(a) for a in todo))
+        self.signals._stats.clear()
+        return self.traders()
 
     def traders(self) -> list[TraderStats]:
         rows = [self.signals.stats(t["address"]) for t in self.store.traders()]

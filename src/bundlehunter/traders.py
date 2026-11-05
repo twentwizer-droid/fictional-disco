@@ -157,6 +157,7 @@ class SignalEngine:
         self.traders: dict[str, str] = {}
         self._buys: dict[str, dict[str, float]] = defaultdict(dict)  # mint -> trader -> last buy ts
         self._analyzed: dict[str, float] = {}
+        self._sold: set[tuple[str, str]] = set()
         self._stats: dict[str, tuple[float, TraderStats]] = {}
         self._tasks: set[asyncio.Task] = set()
         self.sent = 0
@@ -197,15 +198,20 @@ class SignalEngine:
             return
         sc = self.cfg.signals
         name = e(self.traders[ev.wallet] or short(ev.wallet))
+        me = self._person(ev.wallet)
         if ev.kind == "buy":
             if not sc.trader_buys or ev.sol_amount < sc.min_trader_buy_sol:
                 return
             window = self._buys[ev.mint]
-            others = [w for w, ts in window.items() if w != ev.wallet and ev.ts - ts <= sc.confluence_window_s]
-            first_buy_here = ev.wallet not in window
+            already = any(self._person(w) == me for w in window)  # this person (any of their wallets) is in
+            others: dict[str, float] = {}  # other people who bought within the window -> first buy ts
+            for w, ts in window.items():
+                p = self._person(w)
+                if p != me and ev.ts - ts <= sc.confluence_window_s:
+                    others[p] = min(ts, others.get(p, ts))
             window[ev.wallet] = ev.ts
-            if not first_buy_here and not others:
-                return  # same trader adding to a position: no new signal
+            if already:
+                return  # same person adding, or buying with another of their wallets: no new signal
             lines = [
                 "📡 <b>Трейдер купив</b>" if not others else f"🔥 <b>{len(others) + 1} твоїх трейдери в одному токені</b>",
                 f"👤 <b>{name}</b> <code>{e(short(ev.wallet))}</code> · {e(self.stats(ev.wallet).line())}",
@@ -213,15 +219,21 @@ class SignalEngine:
                 f"💰 {ev.sol_amount:.2f} SOL",
             ]
             if others:
-                mins = (ev.ts - min(window[w] for w in others)) / 60
-                lines.append("👥 Також купили (за " + f"{mins:.0f} хв): " +
-                             ", ".join(e(self.traders[w] or short(w)) for w in others))
+                mins = (ev.ts - min(others.values())) / 60
+                lines.append("👥 Також купили (за " + f"{mins:.0f} хв): " + ", ".join(e(p) for p in others))
             self._emit("\n".join(lines))
             self._follow_up(ev.mint)
         else:
-            if not sc.trader_sells or ev.wallet not in self._buys.get(ev.mint, {}):
+            bought = any(self._person(w) == me for w in self._buys.get(ev.mint, {}))
+            if not sc.trader_sells or not bought or (me, ev.mint) in self._sold:
                 return
+            self._sold.add((me, ev.mint))
             self._emit(f"🔻 <b>Трейдер продає</b>\n👤 <b>{name}</b> · {self._token(ev.mint)}\n💰 {ev.sol_amount:.2f} SOL")
+
+    def _person(self, wallet: str) -> str:
+        """Wallets with the same name are one person (people run many wallets)."""
+        label = (self.traders.get(wallet) or "").strip()
+        return label if label else short(wallet)
 
     def on_bundle_watch(self, mint: str, cluster_id: str) -> None:
         if not self.cfg.signals.bundle_signals:

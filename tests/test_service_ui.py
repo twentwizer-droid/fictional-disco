@@ -241,3 +241,29 @@ def test_telegram_trader_commands():
     assert "Трейдера додано" in sent.messages[1][1] and "мало даних" in sent.messages[1][1]
     assert "Трейдерів ще немає" in sent.messages[2][1]  # fake add didn't store it
     assert svc.signals.send == bot.notify_html  # signals go out through the bot
+
+
+def test_telegram_imports_a_wallet_file():
+    import json as _json
+
+    svc = _service()
+    w1, w2, w3 = _addr(), _addr(), _addr()
+    export = _json.dumps([
+        {"trackedWalletAddress": w1, "name": "Alpha 120k", "emoji": "😀"},
+        {"trackedWalletAddress": w2, "name": "Bybit", "emoji": "🏦"},
+        {"trackedWalletAddress": w3, "name": "Yugi Bundle", "emoji": "✂️"},
+    ]).encode("utf-16")
+    sent = Sent()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "documents/w.txt"}})
+        if request.url.path == "/file/botTOKEN/documents/w.txt":
+            return httpx.Response(200, content=export)
+        return sent.handler(request)
+
+    bot = TelegramBot("TOKEN", {42}, svc, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    asyncio.run(bot.handle({"chat": {"id": 42}, "from": {"id": 42}, "document": {"file_id": "F", "file_size": 100}}))
+    report = sent.messages[-1][1]
+    assert "Додано в стеження: <b>1</b>" in report and "біржа (CEX): 1" in report and "Yugi (1)" in report
+    assert [t["address"] for t in svc.store.traders()] == [w1] and svc.signals.traders == {w1: "Alpha 120k"}

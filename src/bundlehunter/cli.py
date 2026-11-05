@@ -227,30 +227,95 @@ async def cmd_narrative(cfg: Config, store: Store, args: argparse.Namespace) -> 
 
 
 async def cmd_trader(cfg: Config, store: Store, args: argparse.Namespace) -> None:
-    """Your trader watchlist (signals come from `bh serve`)."""
+    """Trader watchlist for signals: add / rm / list / show / import (sort exports) / rank (by real PnL)."""
     from .traders import trader_stats
+    from .walletsort import CATEGORY_UA, FOLLOW, load, merge, write_csv
+
+    items = args.items
+    if args.action == "import":
+        if not items:
+            sys.exit("give one or more export files: bh trader import Wallets.txt WalletTracker.txt")
+        result = merge(load(p) for p in items)
+        print(f"{result.total_in} wallets in, {len(result.wallets)} unique, {result.duplicates} duplicates, "
+              f"{len(result.invalid)} invalid")
+        for cat, ws in result.by_category().items():
+            print(f"  {cat:9} {len(ws):5}  {CATEGORY_UA[cat]}{'  -> follow' if cat in FOLLOW else ''}")
+        for group, ws in result.bundle_groups().items():
+            print(f"  bundle group {group}: {len(ws)} wallets")
+        if args.csv:
+            write_csv(result, args.csv)
+            print(f"sorted list written to {args.csv}")
+        if args.dry_run:
+            return
+        cats = tuple(result.by_category()) if args.all else FOLLOW
+        added = 0
+        for w in result.wallets:
+            if w.category in cats:
+                store.add_trader(w.address, w.label)
+                added += 1
+        print(f"added {added} wallets to the watchlist (bh trader rank to check their real PnL)")
+        if args.seed_bundles:
+            rpc = _rpc(cfg)
+            try:
+                an = Analyzer(rpc, store, cfg.analyzer)
+                for group, ws in result.bundle_groups().items():
+                    for w in ws[: args.seed_bundles]:
+                        print(f"seeding bundle group {group} from {w.address} ...")
+                        await an.seed_wallet(w.address, max_launches=10)
+            finally:
+                await rpc.close()
+        return
+
+    if args.action == "rank":
+        rpc = _rpc(cfg)
+        try:
+            an = Analyzer(rpc, store, cfg.analyzer)
+            todo = [t["address"] for t in store.traders() if not store.wallet(t["address"])][: args.limit]
+            for i, addr in enumerate(todo, 1):
+                print(f"[{i}/{len(todo)}] loading {addr}", flush=True)
+                try:
+                    await an.profile_wallet(addr, max_txs=args.txs)
+                except Exception as exc:
+                    print(f"  failed: {exc}")
+        finally:
+            await rpc.close()
+        args.action = "list"
 
     if args.action == "list":
-        rows = [trader_stats(store, t["address"], t["label"] or "") for t in store.traders()]
-        for st in sorted(rows, key=lambda t: t.realized_pnl, reverse=True):
-            print(f"{st.address}  {st.label or '-':16} pnl {st.realized_pnl:+8.2f} SOL  win {st.win_rate:4.0%}  "
+        rows = [trader_stats(store, t["address"], t["label"] or "", cfg.clusters.closed_sold_frac) for t in store.traders()]
+        rows.sort(key=lambda t: ({"в плюсі": 0, "мало даних": 1}.get(t.verdict, 2), -t.realized_pnl))
+        for st in rows:
+            print(f"{st.address}  {st.label[:18] or '-':18} pnl {st.realized_pnl:+9.2f} SOL  win {st.win_rate:4.0%}  "
                   f"closed {len(st.closed):3}  {st.verdict}")
+        if args.csv:
+            import csv
+
+            with open(args.csv, "w", newline="", encoding="utf-8-sig") as fh:
+                wr = csv.writer(fh)
+                wr.writerow(["address", "name", "verdict", "realized_pnl_sol", "win_rate", "closed", "tokens", "avg_buy_sol"])
+                for st in rows:
+                    wr.writerow([st.address, st.label, st.verdict, round(st.realized_pnl, 4), round(st.win_rate, 3),
+                                 len(st.closed), len(st.tokens), round(st.avg_buy_sol, 4)])
+            print(f"written to {args.csv}")
         if not rows:
-            print("no traders yet: bh trader add <wallet> [label]")
+            print("no traders yet: bh trader add <wallet> [label]  or  bh trader import <export file>")
         return
-    if not args.wallet:
+
+    wallet = items[0] if items else ""
+    label = " ".join(items[1:])
+    if not wallet:
         sys.exit("give a wallet address")
     if args.action == "rm":
-        print("removed" if store.remove_trader(args.wallet) else "not in the list")
+        print("removed" if store.remove_trader(wallet) else "not in the list")
         return
     if args.action == "add":
-        store.add_trader(args.wallet, args.label or "")
+        store.add_trader(wallet, label)
     rpc = _rpc(cfg)
     try:
-        await Analyzer(rpc, store, cfg.analyzer).profile_wallet(args.wallet, max_txs=cfg.signals.trader_history_txs)
+        await Analyzer(rpc, store, cfg.analyzer).profile_wallet(wallet, max_txs=cfg.signals.trader_history_txs)
     finally:
         await rpc.close()
-    st = trader_stats(store, args.wallet, args.label or "", cfg.clusters.closed_sold_frac)
+    st = trader_stats(store, wallet, label, cfg.clusters.closed_sold_frac)
     print(f"{st.address}: {st.verdict}, realized {st.realized_pnl:+.2f} SOL, win {st.win_rate:.0%}, "
           f"{len(st.tokens)} tokens ({len(st.closed)} closed), avg buy {st.avg_buy_sol:.2f} SOL")
     for t in sorted(st.tokens, key=lambda t: t.first_buy or 0, reverse=True)[:15]:
@@ -449,10 +514,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--db-only", action="store_true", help="no network at all")
     s.add_argument("--json", action="store_true")
 
-    s = sub.add_parser("trader", help="trader watchlist for signals: add / rm / list / show")
-    s.add_argument("action", choices=["add", "rm", "list", "show"])
-    s.add_argument("wallet", nargs="?")
-    s.add_argument("label", nargs="?", default="")
+    s = sub.add_parser("trader", help="trader watchlist for signals: add / rm / list / show / import / rank")
+    s.add_argument("action", choices=["add", "rm", "list", "show", "import", "rank"])
+    s.add_argument("items", nargs="*", help="wallet [label] | export files for import")
+    s.add_argument("--csv", help="import: write the sorted list here; list/rank: write the ranking here")
+    s.add_argument("--dry-run", action="store_true", help="import: only sort and report, add nothing")
+    s.add_argument("--all", action="store_true", help="import: add every category, not only good/trader/unnamed")
+    s.add_argument("--seed-bundles", type=int, default=0, metavar="N",
+                   help="import: analyze launches of N wallets from each bundle group (RPC heavy)")
+    s.add_argument("--limit", type=int, default=50, help="rank: traders to load history for")
+    s.add_argument("--txs", type=int, default=150, help="rank: txs per trader")
 
     s = sub.add_parser("clusters", help="rank bundler clusters by realized PnL")
     s.add_argument("--top", type=int, default=30)

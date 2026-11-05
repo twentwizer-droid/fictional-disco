@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import html
+import os
+import tempfile
 import logging
 import time
 from typing import Any
@@ -22,6 +24,7 @@ from .larp import SOL_ADDRESS, _ago_ua, _short
 from .narrative import Member
 from .service import CheckResult, NarrativeResult, Service
 from .traders import TraderStats
+from .walletsort import CATEGORY_ORDER, CATEGORY_UA, FOLLOW, SortResult
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +51,8 @@ HELP = """<b>bundlehunter</b> 🤖
 <b>/traders</b> — твої трейдери з їхнім PnL
 <b>/trader</b> &lt;гаманець&gt; — перевірити будь-який гаманець: чи він у плюсі
 <b>/deltrader</b> &lt;гаманець&gt; — прибрати трейдера
+<b>Надішли файл</b> (експорт гаманців з Axiom / GMGN, .txt чи .json) — бот відсортує й додасть трейдерів
+<b>/rank</b> [скільки] — завантажити історію і відсортувати трейдерів за реальним PnL
 
 Можна просто надіслати адресу токена або слова наратива."""
 
@@ -215,11 +220,13 @@ def fmt_trader(st: TraderStats) -> str:
 def fmt_traders(rows: list[TraderStats]) -> str:
     if not rows:
         return "Трейдерів ще немає. Додай: /addtrader &lt;гаманець&gt; [назва]"
-    lines = ["<b>Твої трейдери</b>", ""]
-    for st in rows:
+    lines = [f"<b>Твої трейдери</b> ({len(rows)}, найкращі зверху)", ""]
+    for st in rows[:40]:
         icon = {"в плюсі": "✅", "в мінусі": "🔻"}.get(st.verdict, "❔")
         lines.append(f"{icon} <b>{e(st.name)}</b> <code>{e(_short(st.address))}</code> · {st.realized_pnl:+.1f} SOL · "
                      f"{st.win_rate:.0%} · {len(st.closed)} угод")
+    if len(rows) > 40:
+        lines.append(f"… і ще {len(rows) - 40}. Повний список: веб-панель, вкладка «Трейдери».")
     return "\n".join(lines)
 
 
@@ -311,7 +318,7 @@ class TelegramBot:
             for u in updates or []:
                 offset = u["update_id"] + 1
                 msg = u.get("message") or {}
-                if msg.get("text"):
+                if msg.get("text") or msg.get("document"):
                     task = asyncio.create_task(self.handle(msg))
                     self._tasks.add(task)
                     task.add_done_callback(self._tasks.discard)
@@ -324,6 +331,13 @@ class TelegramBot:
                 f"🔒 Доступ закритий. Твій ID: <code>{chat_id}</code>\n"
                 "Додай його в .env як BH_TELEGRAM_ALLOWED_IDS і перезапусти бота."
             ))
+            return
+        if msg.get("document"):
+            try:
+                await self.import_document(chat_id, msg["document"])
+            except Exception as exc:
+                log.exception("telegram import failed")
+                await self.send(chat_id, f"❌ Не вдалося прочитати файл: {e(exc)}")
             return
         text = msg["text"].strip()
         cmd, _, arg = text.partition(" ")
@@ -384,6 +398,11 @@ class TelegramBot:
             await self.send(chat_id, "Прибрано." if ok else "Такого трейдера немає в списку.")
         elif cmd == "/traders":
             await self.send(chat_id, fmt_traders(self.service.traders()))
+        elif cmd == "/rank":
+            n = int(arg) if arg.strip().isdigit() else 30
+            await self.send(chat_id, f"⏳ Завантажую історію до {n} трейдерів без даних і рахую PnL. "
+                                     "Це кілька хвилин; можна запускати /rank ще раз для наступних.")
+            await self.send(chat_id, fmt_traders(await self.service.rank_traders(limit=n)))
         elif cmd == "/trader":
             if not arg:
                 raise ValueError("додай гаманець: /trader <гаманець>")
@@ -395,6 +414,41 @@ class TelegramBot:
             await self.send(chat_id, fmt_status(self.service.status()))
         else:
             await self.send(chat_id, "Не знаю такої команди.\n\n" + HELP)
+
+
+    async def import_document(self, chat_id: int, doc: dict[str, Any]) -> None:
+        if (doc.get("file_size") or 0) > 5_000_000:
+            raise ValueError("файл більший за 5 МБ")
+        await self.send(chat_id, "⏳ Читаю і сортую гаманці…")
+        info = await self.api("getFile", file_id=doc["file_id"])
+        url = self.base.replace("/bot", "/file/bot", 1) + "/" + info["file_path"]
+        resp = await self.http.get(url)
+        resp.raise_for_status()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "wallets.txt")
+            with open(path, "wb") as fh:
+                fh.write(resp.content)
+            result, added = await self.service.import_wallets([path])
+        await self.send(chat_id, fmt_import(result, added))
+
+
+def fmt_import(result: SortResult, added: int) -> str:
+    groups = result.by_category()
+    lines = [f"📥 <b>Гаманців у файлі:</b> {result.total_in} · унікальних {len(result.wallets)} · "
+             f"дублікатів {result.duplicates}" + (f" · невалідних {len(result.invalid)}" if result.invalid else ""), ""]
+    for cat in CATEGORY_ORDER:
+        if groups[cat]:
+            mark = "➕" if cat in FOLLOW else "➖"
+            lines.append(f"{mark} {e(CATEGORY_UA[cat])}: {len(groups[cat])}")
+    bundles = result.bundle_groups()
+    if bundles:
+        lines += ["", "📦 Бандл-групи: " + ", ".join(f"{e(k)} ({len(v)})" for k, v in list(bundles.items())[:6])]
+    multi = sorted(((n, c) for n, c in result.name_counts().items() if c >= 5), key=lambda x: -x[1])[:6]
+    if multi:
+        lines.append("👥 Одна людина, багато гаманців: " + ", ".join(f"{e(n)} ({c})" for n, c in multi))
+    lines += ["", f"✅ Додано в стеження: <b>{added}</b> (➕ категорії). Біржі, розробники, снайпери й «погані» не додані.",
+              "Далі: /rank — бот завантажить історію і покаже, хто реально в плюсі."]
+    return "\n".join(lines)
 
 
 def started_line(service: Service) -> str:

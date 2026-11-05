@@ -115,3 +115,23 @@ def test_fmt_analysis_short():
     report = LarpReport("M", TokenMeta(symbol="X"), [])
     text = fmt_analysis(CheckResult("M", None, report, None, False, ""))
     assert "LARP 0/100" in text
+
+
+def test_same_name_wallets_count_as_one_person():
+    a1, a2, b = _addr(), _addr(), _addr()
+    store = Store(":memory:")
+    eng, out = _engine(store, [(a1, "scharo"), (a2, "scharo"), (b, "Beta")])
+    eng.cfg.signals.analyze = False
+
+    async def go():
+        eng.on_trade(ev("buy", "MINT", a1, 1.0, T0))
+        eng.on_trade(ev("buy", "MINT", a2, 1.0, T0 + 5))  # scharo's second wallet: silent
+        eng.on_trade(ev("buy", "MINT", b, 1.0, T0 + 10))  # a real second person: confluence of 2
+        eng.on_trade(ev("sell", "MINT", a1, 1.0, T0 + 20))
+        eng.on_trade(ev("sell", "MINT", a2, 1.0, T0 + 21))  # same person selling again: silent
+        await asyncio.sleep(0.01)
+
+    asyncio.run(go())
+    assert len(out) == 3
+    assert "2 твоїх трейдери" in out[1] and "Також купили" in out[1] and "scharo" in out[1]
+    assert out[2].startswith("🔻")
