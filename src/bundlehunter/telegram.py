@@ -343,7 +343,19 @@ class TelegramBot:
             await self.send(chat_id, text)
 
     async def run(self) -> None:
-        me = await self.api("getMe")
+        """A bad token or no internet must never take the trading loop and the web panel down with it."""
+        backoff = 5.0
+        while True:
+            try:
+                me = await self.api("getMe")
+                break
+            except Exception as exc:
+                if any(k in str(exc) for k in ("Unauthorized", "Not Found")):
+                    log.error("Telegram вимкнено: токен BH_TELEGRAM_TOKEN неправильний (%s). Бот і веб-панель працюють далі.", exc)
+                    return
+                log.warning("telegram недоступний (%s), повтор через %.0f с", exc, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 300)
         log.info("telegram bot @%s is up (%d allowed chats)", me.get("username"), len(self.allowed))
         offset, backoff = None, 1.0
         while True:

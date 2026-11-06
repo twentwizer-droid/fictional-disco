@@ -292,3 +292,17 @@ def test_web_learn_needs_intent_and_reports(tmp_path, monkeypatch):
             assert r.status == 200 and "папки немає" in body["text"] and body["learned"]["promoted"] is False
 
     asyncio.run(go())
+
+
+def test_telegram_bad_token_does_not_stop_the_bot():
+    from bundlehunter.telegram import TelegramBot
+
+    async def go():
+        bot = TelegramBot("bad", set(), _service())
+
+        async def api(method, **kw):
+            raise RuntimeError("telegram getMe: Unauthorized")
+        bot.api = api
+        await asyncio.wait_for(bot.run(), 1)  # returns instead of raising
+
+    asyncio.run(go())
