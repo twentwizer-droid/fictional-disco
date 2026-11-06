@@ -174,6 +174,7 @@ def test_runner_scalps_on_paper_end_to_end():
     cfg = Config()
     cfg.strategy.panel_delay_s = 0
     cfg.scalp.strong_trader_score = 70
+    cfg.scalp.exit_mode = "smart"  # this test follows TP1 partial -> break-even -> trailing
     larp = FakeLarp()
     broker = PaperBroker(2.0, 0.0007, 1.25, store=store, start_balance=1.0)
     runner = BotRunner(cfg, store, FakeRpc(), broker, feed, scanner=FakeScanner(), larp=larp)

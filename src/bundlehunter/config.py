@@ -190,7 +190,17 @@ class ScalpConfig:
     max_hold_s: float = 600.0
     # exit mode: "smart" (TP1 part -> break-even -> trailing ladder), "never_lose" (no red exit once
     # break-even is locked; before that only an emergency stop), "fixed" (all-or-nothing TP / SL)
-    exit_mode: str = "smart"
+    exit_mode: str = "candle"
+    # "candle": the whole trade lives inside ONE candle: enter on a green, confirmed candle,
+    # sell everything at TP / stop / trailing or when the candle closes. Many short trades, no hour-long holds.
+    candle_s: float = 60.0  # candle length = max time in a position
+    candle_entry_candles: int = 3  # no setup within 3 candles of the first smart buy -> skip, free the slot
+    candle_tp_pct: float = 0.15
+    candle_min_tp_cost_multiple: float = 2.0  # TP still >= 2x round-trip costs, or fees eat every win
+    candle_sl_pct: float = 0.08  # hard stop, no waiting: there is no time inside one candle
+    candle_trail_pct: float = 0.05  # after half the TP: out 5% below the candle's high
+    candle_cooldown_s: float = 60.0  # after a loss: sit out one candle, not ten minutes
+    candle_max_trades_per_hour: int = 30
     round_trip_cost_pct: float = 0.06  # fees + slippage both ways; paper uses the broker's real figure
     min_tp_cost_multiple: float = 3.0  # take profit is never below 3x the costs (a +12% TP on 3.3% costs bleeds)
     tp1_fraction: float = 0.5  # share sold at TP1: gets the stake back, the rest runs for free
@@ -203,6 +213,7 @@ class ScalpConfig:
     gate: str = "live"  # "live" = live needs a validated strategy (paper keeps trading to collect data),
     #                     "always" = paper too, "off" = never
     eval_every_s: float = 6 * 3600
+    eval_modes: list[str] = field(default_factory=lambda: ["candle"])  # modes the validation may choose from
     eval_split: float = 0.7  # pick the exit mode on the oldest 70% of tokens, judge it on the newest 30%
     fill_delay_s: float = 2.0  # replay fills at the price this much after the decision
     min_test_trades: int = 8

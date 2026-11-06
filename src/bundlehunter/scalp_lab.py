@@ -34,7 +34,7 @@ from .scalp import ScalpStrategy
 from .storage import Store
 
 VALIDATED_FILE = "data/scalp_validated.json"
-MODES = ("smart", "never_lose", "fixed")
+MODES = ("candle", "smart", "never_lose", "fixed")
 
 
 def replay(events: dict[str, list[dict]], checks: dict[str, dict], scfg: ScalpConfig, broker: PaperBroker,
@@ -124,8 +124,9 @@ def evaluate(store: Store, cfg: Config, save: bool = True) -> dict[str, Any]:
     def broker() -> PaperBroker:
         return PaperBroker(ex.paper_slippage_pct, ex.paper_fee_sol, ex.paper_fee_pct)
 
-    by_mode = {m: summarize(replay(train, checks, replace(scfg, exit_mode=m), broker(), scfg.fill_delay_s)) for m in MODES}
-    candidates = [m for m in MODES if by_mode[m]["trades"]]
+    modes = [m for m in scfg.eval_modes if m in MODES] or [scfg.exit_mode]
+    by_mode = {m: summarize(replay(train, checks, replace(scfg, exit_mode=m), broker(), scfg.fill_delay_s)) for m in modes}
+    candidates = [m for m in modes if by_mode[m]["trades"]]
     chosen = max(candidates, key=lambda m: by_mode[m]["pnl_sol"]) if candidates else scfg.exit_mode
     unseen = summarize(replay(test, checks, replace(scfg, exit_mode=chosen), broker(), scfg.fill_delay_s))
 

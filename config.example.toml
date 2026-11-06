@@ -123,7 +123,16 @@ trailing_pct = 0.10        # after half the take profit
 max_hold_s = 600
 exit_sell_pressure = 1.5   # sells outweigh buys -> the idea is over
 exit_on_smart_sell = true
-exit_mode = "smart"        # smart | never_lose | fixed
+exit_mode = "candle"       # candle (whole trade inside one candle) | smart | never_lose | fixed
+candle_s = 60              # candle length = max time in a position, seconds
+candle_entry_candles = 3   # no setup within 3 candles -> skip the token
+candle_tp_pct = 0.15       # take profit, but never below 2x round-trip costs
+candle_min_tp_cost_multiple = 2.0
+candle_sl_pct = 0.08       # hard stop, at once
+candle_trail_pct = 0.05    # after half the TP: out 5% below the candle high
+candle_cooldown_s = 60     # after a loss sit out one candle
+candle_max_trades_per_hour = 30
+eval_modes = ["candle"]    # modes `bh scalp eval` may choose from (add "smart", "never_lose", "fixed" to compare)
 round_trip_cost_pct = 0.06 # live estimate; paper uses the broker's real costs
 min_tp_cost_multiple = 3.0 # take profit >= 3x costs
 tp1_fraction = 0.5         # share sold at TP1, then stop to break-even

@@ -96,7 +96,7 @@ def test_never_lose_is_not_magic():
 
 
 def test_take_profit_never_below_three_times_costs():
-    s = ScalpStrategy(ScalpConfig(take_profit_max_pct=0.12, take_profit_min_pct=0.12), TRADERS)
+    s = ScalpStrategy(ScalpConfig(take_profit_max_pct=0.12, take_profit_min_pct=0.12, exit_mode="smart"), TRADERS)
     s.cost_model = lambda size: 0.06
     assert s.take_profit_for(0.1) == pytest.approx(0.18)  # 3 x 6%
     b = PaperBroker(2.0, 0.0007, 1.25)

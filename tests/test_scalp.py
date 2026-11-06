@@ -1,3 +1,5 @@
+import pytest
+
 from bundlehunter.config import ScalpConfig
 from bundlehunter.models import MarketEvent
 from bundlehunter.scalp import ScalpPosition, ScalpStrategy
@@ -112,7 +114,7 @@ def test_exits_take_profit_stop_trailing_momentum_smart_sell_time():
 
 
 def test_no_revenge_trading_after_losses():
-    s = ScalpStrategy(ScalpConfig(max_consecutive_losses=2, cooldown_after_loss_s=600), TRADERS)
+    s = ScalpStrategy(ScalpConfig(max_consecutive_losses=2, cooldown_after_loss_s=600, exit_mode="smart"), TRADERS)
     s.positions["X"] = ScalpPosition("X", 1.0, 0, 0.1, 1, 0.5, 0.15, 0.1, 600, set(), "r")
     s.on_sell_filled("X", 0.8, 0.08, 100, "стоп-лос")
     assert s.loss_streak == 1 and s.risk_block(200) == "охолодження після збитку" and s.risk_block(800) == ""
@@ -126,7 +128,7 @@ def test_no_revenge_trading_after_losses():
 
 
 def test_skips_are_recorded_with_reasons():
-    s = ScalpStrategy(ScalpConfig(entry_window_s=60), TRADERS)
+    s = ScalpStrategy(ScalpConfig(entry_window_s=60, exit_mode="smart"), TRADERS)
     s.on_event(ev("buy", "strong", 1e-6, 0))
     ready(s)
     s.on_tick(100)
@@ -137,3 +139,50 @@ def test_skips_are_recorded_with_reasons():
     s2.set_check(M, True, metrics={**PANEL, "larp_score": 80})
     s2.on_event(ev("buy", "z", 1e-6, 1))
     assert "LARP" in s2.status(2)["skipped"][0]["why"]
+
+
+def _candle_entry(cfg):
+    s = ScalpStrategy(cfg, TRADERS)
+    s.cost_model = lambda size: 0.06
+    s.on_event(ev("buy", "strong", 1e-6, 0))
+    ready(s)
+    (buy,) = crowd(s, 1, 1.0e-6, n=7)
+    return s, s.on_buy_filled(M, buy.ref_price, 0.1 / buy.ref_price, 0.1, 8, buy.reason)
+
+
+def test_candle_mode_is_default_and_lives_one_candle():
+    s, pos = _candle_entry(ScalpConfig(buy_sol=0.1))
+    assert pos.mode == "candle" and pos.max_hold_s == 60 and pos.sl == 0.08
+    assert pos.tp == pytest.approx(0.15) and "одна свічка 60 с" in pos.plan
+    assert s.on_tick(30) == []
+    (sell,) = s.on_tick(68)  # the candle closed: out, whatever the price
+    assert sell.side == "sell" and "свічка закрилась" in sell.reason and sell.fraction == 1.0
+
+
+def test_candle_mode_takes_profit_and_stops_at_once():
+    s, pos = _candle_entry(ScalpConfig(buy_sol=0.1))
+    (tp,) = s.on_event(ev("buy", "x", pos.entry_price * 1.16, 10))
+    assert "тейк-профіт" in tp.reason and tp.fraction == 1.0
+    s, pos = _candle_entry(ScalpConfig(buy_sol=0.1))
+    (sl,) = s.on_event(ev("sell", "x", pos.entry_price * 0.91, 10, 0.1))
+    assert "стоп-лос" in sl.reason  # no waiting for confirmation inside one candle
+
+
+def test_candle_tp_never_below_two_times_costs_and_short_cooldown():
+    s = ScalpStrategy(ScalpConfig(), TRADERS)
+    s.cost_model = lambda size: 0.10
+    assert s.take_profit_for(0.1) == pytest.approx(0.20)
+    s.positions["X"] = ScalpPosition("X", 1.0, 0, 0.1, 1, 0.5, 0.08, 0.05, 60, set(), "r")
+    s.on_sell_filled("X", 0.9, 0.09, 100, "стоп")
+    assert s.risk_block(130) == "охолодження після збитку" and s.risk_block(161) == ""
+    assert s.status(161)["max_per_hour"] == 30
+
+
+def test_candle_mode_waits_for_a_green_candle():
+    s = ScalpStrategy(ScalpConfig(buy_sol=0.1), TRADERS)
+    s.on_event(ev("buy", "strong", 2e-6, 0))
+    ready(s)
+    assert crowd(s, 1, 1.5e-6, n=7) == []  # plenty of buyers, but the candle is red (2.0 -> 1.5)
+    assert s.watches[M].block_reason == "свічка не зелена: чекаю зеленої"
+    s.on_tick(181)  # 3 candles without a setup: skip and free the slot
+    assert M not in s.watches

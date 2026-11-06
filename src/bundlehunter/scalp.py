@@ -127,6 +127,9 @@ class ScalpPosition:
 
     @property
     def plan(self) -> str:
+        if self.mode == "candle":
+            return (f"одна свічка {self.max_hold_s:.0f} с: TP +{self.tp:.0%}, стоп −{self.sl:.0%}, "
+                    f"трейлінг {self.trail:.0%} після +{self.tp / 2:.0%}; витрати на коло ~{self.cost:.1%}")
         if self.mode == "fixed":
             return (f"TP +{self.tp:.0%}, стоп −{self.sl:.0%}, трейлінг {self.trail:.0%} після +{self.tp / 2:.0%}, "
                     f"макс {self.max_hold_s / 60:.0f} хв")
@@ -139,8 +142,8 @@ class ScalpStrategy:
     name = "scalp"
 
     def __init__(self, cfg: ScalpConfig, traders: dict[str, tuple[str, float | None]] | None = None) -> None:
-        if cfg.exit_mode not in ("smart", "never_lose", "fixed"):
-            raise ValueError(f"scalp.exit_mode must be smart / never_lose / fixed, got {cfg.exit_mode!r}")
+        if cfg.exit_mode not in ("candle", "smart", "never_lose", "fixed"):
+            raise ValueError(f"scalp.exit_mode must be candle / smart / never_lose / fixed, got {cfg.exit_mode!r}")
         self.cfg = cfg
         self.cost_model = None  # size_sol -> round-trip cost fraction (the paper broker's real figure)
         self.recorder = None  # (event, (person, score) | None) -> None: feeds bh scalp eval
@@ -203,8 +206,8 @@ class ScalpStrategy:
             state = "вимкнено"
         elif now < self.paused_until:
             state = f"пауза після {self.loss_streak} збитків поспіль ще {(self.paused_until - now) / 60:.0f} хв"
-        elif now - self.last_loss_ts < cfg.cooldown_after_loss_s:
-            state = f"охолодження після збитку ще {(cfg.cooldown_after_loss_s - (now - self.last_loss_ts)) / 60:.0f} хв"
+        elif now - self.last_loss_ts < self.cooldown_s:
+            state = f"охолодження після збитку ще {self.cooldown_s - (now - self.last_loss_ts):.0f} с"
         elif self.today_pnl(now) <= -cfg.daily_loss_limit_sol:
             state = "денний ліміт збитку досягнуто"
         closed = self.closed
@@ -215,6 +218,7 @@ class ScalpStrategy:
             "win_rate": sum(float(c["pnl_sol"]) > 0 for c in closed) / len(closed) if closed else None,
             "loss_streak": self.loss_streak,
             "entries_last_hour": sum(1 for t in self.entries if now - t < 3600),
+            "max_per_hour": self.max_per_hour,
             "watching": [
                 {"mint": w.mint, "smart": sorted(w.smart), "age_s": now - w.started_ts, "blocked": w.block_reason,
                  "in_position": w.mint in self.positions, "price": w.last_price,
@@ -272,8 +276,8 @@ class ScalpStrategy:
             pos = self.positions.get(mint)
             if pos:
                 actions += self._exits(w, pos, now)
-            elif not w.pending and now - w.started_ts > self.cfg.entry_window_s:
-                self._finish(w, f"за {self.cfg.entry_window_s / 60:.0f} хв не підтвердилось: {w.block_reason or '—'}",
+            elif not w.pending and now - w.started_ts > self.entry_window_s:
+                self._finish(w, f"за {self.entry_window_s / 60:.0f} хв не підтвердилось: {w.block_reason or '—'}",
                              skipped=True)
         return actions
 
@@ -291,15 +295,31 @@ class ScalpStrategy:
             return "перевірка застаріла: потрібна нова bh scalp eval"
         return ""
 
+    @property
+    def candle(self) -> bool:
+        return self.cfg.exit_mode == "candle"
+
+    @property
+    def entry_window_s(self) -> float:
+        return self.cfg.candle_s * self.cfg.candle_entry_candles if self.candle else self.cfg.entry_window_s
+
+    @property
+    def cooldown_s(self) -> float:
+        return self.cfg.candle_cooldown_s if self.candle else self.cfg.cooldown_after_loss_s
+
+    @property
+    def max_per_hour(self) -> int:
+        return self.cfg.candle_max_trades_per_hour if self.candle else self.cfg.max_trades_per_hour
+
     def risk_block(self, now: float) -> str:
         cfg = self.cfg
         if now < self.paused_until:
             return f"пауза: {self.loss_streak} збитки поспіль, не мщу ринку"
-        if now - self.last_loss_ts < cfg.cooldown_after_loss_s:
+        if now - self.last_loss_ts < self.cooldown_s:
             return "охолодження після збитку"
         if self.today_pnl(now) <= -cfg.daily_loss_limit_sol:
             return "денний ліміт збитку"
-        if sum(1 for t in self.entries if now - t < 3600) >= cfg.max_trades_per_hour:
+        if sum(1 for t in self.entries if now - t < 3600) >= self.max_per_hour:
             return "забагато угод за годину"
         if len(self.positions) >= cfg.max_open_positions:
             return "максимум відкритих позицій"
@@ -309,7 +329,7 @@ class ScalpStrategy:
         cfg = self.cfg
         if w.pending:
             return []
-        if now - w.started_ts > cfg.entry_window_s:
+        if now - w.started_ts > self.entry_window_s:
             return self._finish(w, f"час на вхід минув: {w.block_reason or '—'}", skipped=True)
         if w.smart_sold:
             return self._finish(w, "сильні гаманці вже продають: ідеї більше немає", skipped=True)
@@ -344,11 +364,17 @@ class ScalpStrategy:
             w.block_reason = f"сильних гаманців {len(w.smart)} з {cfg.min_smart_wallets}"
             return []
         # 2. confirmation by volume, not by a green candle
-        mo = w.momentum(now, cfg.momentum_window_s)
+        candle = cfg.exit_mode == "candle"
+        mo = w.momentum(now, cfg.candle_s if candle else cfg.momentum_window_s)
         if mo.buy_sol < cfg.min_buy_volume_sol or mo.buyers < cfg.min_unique_buyers or mo.pressure < cfg.min_buy_pressure:
             w.block_reason = (f"немає підтвердження: купівлі {mo.buy_sol:.1f} SOL, продажі {mo.sell_sol:.1f}, "
-                              f"покупців {mo.buyers} за {cfg.momentum_window_s:.0f} с")
+                              f"покупців {mo.buyers} за {cfg.candle_s if candle else cfg.momentum_window_s:.0f} с")
             return []
+        if candle:
+            opened = w.price_ago(now, cfg.candle_s)
+            if opened and w.last_price <= opened:
+                w.block_reason = "свічка не зелена: чекаю зеленої"
+                return []
         base = w.first_smart_price
         if base and w.last_price > base * (1 + cfg.max_chase_pct):
             w.block_reason = f"вже +{w.last_price / base - 1:.0%} від входу сильних: не доганяю"
@@ -391,6 +417,8 @@ class ScalpStrategy:
 
     def take_profit_for(self, size_sol: float) -> float:
         cfg = self.cfg
+        if self.candle:
+            return max(cfg.candle_tp_pct, cfg.candle_min_tp_cost_multiple * self.cost_for(size_sol))
         k = min(max(size_sol / cfg.size_for_min_tp_sol, 0.0), 1.0) if cfg.size_for_min_tp_sol > 0 else 1.0
         tp = cfg.take_profit_max_pct - (cfg.take_profit_max_pct - cfg.take_profit_min_pct) * k
         return max(tp, cfg.min_tp_cost_multiple * self.cost_for(size_sol))
@@ -410,6 +438,8 @@ class ScalpStrategy:
             return self._sell(pos, p, f"аварійний стоп {p / e - 1:.0%}: обвал, не чекаю")
         if pos.mode == "fixed":
             return self._exits_fixed(w, pos, now)
+        if pos.mode == "candle":
+            return self._exits_candle(w, pos, now)
 
         mo = w.momentum(now, cfg.momentum_window_s)
         dying = mo.sell_sol >= cfg.min_buy_volume_sol / 2 and mo.sell_sol >= cfg.exit_sell_pressure * max(mo.buy_sol, 1e-9)
@@ -451,6 +481,25 @@ class ScalpStrategy:
             return self._sell(pos, p, f"never lose: чекав {held / 60:.0f} хв, беззбиток не прийшов, виходжу {p / e - 1:+.0%}")
         return []
 
+    def _exits_candle(self, w: ScalpWatch, pos: ScalpPosition, now: float) -> list[Action]:
+        """One candle: everything out at TP, at the stop, on a pullback from the high, or at the close."""
+        cfg, p, e = self.cfg, w.last_price, pos.entry_price
+        if p >= e * (1 + pos.tp):
+            return self._sell(pos, p, f"тейк-профіт +{p / e - 1:.0%} в межах свічки")
+        if p <= e * (1 - pos.sl):
+            return self._sell(pos, p, f"стоп-лос {p / e - 1:.0%}: свічка пішла проти")
+        if pos.high >= e * (1 + pos.tp / 2) and p <= pos.high * (1 - pos.trail):
+            return self._sell(pos, p, f"відкат −{1 - p / pos.high:.0%} від максимуму свічки, фіксую {p / e - 1:+.0%}")
+        if cfg.exit_on_smart_sell and pos.persons & w.smart_sold:
+            return self._sell(pos, p, "сильні гаманці продають: виходжу разом з ними")
+        held = now - pos.entry_ts
+        mo = w.momentum(now, min(cfg.candle_s, max(held, 5.0)))
+        if mo.sell_sol >= cfg.min_buy_volume_sol / 2 and mo.sell_sol >= cfg.exit_sell_pressure * max(mo.buy_sol, 1e-9):
+            return self._sell(pos, p, f"продажі перемогли в свічці: {mo.sell_sol:.1f} SOL проти {mo.buy_sol:.1f}")
+        if held >= pos.max_hold_s:
+            return self._sell(pos, p, f"свічка закрилась ({pos.max_hold_s:.0f} с): виходжу {p / e - 1:+.0%}")
+        return []
+
     def _exits_fixed(self, w: ScalpWatch, pos: ScalpPosition, now: float) -> list[Action]:
         cfg, p, e = self.cfg, w.last_price, pos.entry_price
         if p >= e * (1 + pos.tp):
@@ -484,8 +533,11 @@ class ScalpStrategy:
         w = self.watches[mint]
         w.pending = False
         cfg = self.cfg
-        pos = ScalpPosition(mint, price, ts, sol_spent, tokens, self.take_profit_for(sol_spent), cfg.stop_loss_pct,
-                            cfg.trailing_pct, cfg.max_hold_s, set(w.smart), reason, price, position_id,
+        candle = cfg.exit_mode == "candle"
+        pos = ScalpPosition(mint, price, ts, sol_spent, tokens, self.take_profit_for(sol_spent),
+                            cfg.candle_sl_pct if candle else cfg.stop_loss_pct,
+                            cfg.candle_trail_pct if candle else cfg.trailing_pct,
+                            cfg.candle_s if candle else cfg.max_hold_s, set(w.smart), reason, price, position_id,
                             mode=cfg.exit_mode, cost=self.cost_for(sol_spent))
         if cfg.exit_mode == "smart":
             pos.stop_price = price * (1 - cfg.stop_loss_pct)
@@ -531,7 +583,7 @@ class ScalpStrategy:
             pos.closing = False
 
 
-_WAIT = ("немає підтвердження", "сильних гаманців")
+_WAIT = ("немає підтвердження", "сильних гаманців", "свічка не зелена")
 _RISK = ("пауза", "охолодження", "ліміт", "максимум", "забагато", "валідац", "перевір")
 
 

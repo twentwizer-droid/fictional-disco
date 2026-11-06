@@ -80,7 +80,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,ai]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 111 offline tests
+pytest                      # 115 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -284,6 +284,13 @@ Live orders: PumpPortal `trade-local` builds an **unsigned** transaction
 locally, so the key never leaves the process. It is sent as a **Jito bundle**
 `[swap, tip]` and, as a fallback, through RPC (one signature can only land once).
 The fill is read back from the chain.
+
+## One-candle scalping (default)
+
+`[scalp] exit_mode = "candle"`: a trade lives at most one candle (`candle_s = 60`). Entry needs your
+smart wallets plus a green, volume-confirmed current candle; exit is all-out at TP (>= 2x round-trip
+costs), an immediate -8% stop, a 5% pullback from the candle high, sell pressure, or the candle close.
+One-candle cooldown after a loss, up to 30 entries per hour; daily loss limit unchanged.
 
 ## Learn from your export, work from the overlay
 
