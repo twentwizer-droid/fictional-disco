@@ -277,3 +277,18 @@ def test_telegram_paper_commands():
     texts = [t for _, t in sent.messages]
     assert "1.0000 SOL" in texts[0] and "2.5000 SOL" in texts[1] and "2.0000 SOL" in texts[2]
     assert "1.5000 SOL" in texts[3] and "приклад" in texts[4]
+
+
+def test_web_learn_needs_intent_and_reports(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # export/ and data/ are relative to where the bot runs
+    svc = _service()
+
+    async def go():
+        async with TestClient(TestServer(create_app(svc))) as client:
+            assert await (await client.get("/api/learned")).json() is None
+            assert (await client.post("/api/learn", json={})).status == 403
+            r = await client.post("/api/learn", json={}, headers={"X-BH-Action": "1"})
+            body = await r.json()
+            assert r.status == 200 and "папки немає" in body["text"] and body["learned"]["promoted"] is False
+
+    asyncio.run(go())

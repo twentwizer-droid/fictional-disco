@@ -18,6 +18,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 ai = ["anthropic>=2.3"]  # optional AI verdict in `bh check --ai`
+overlay = ["PySide6-Essentials>=6.6"]  # desktop overlay window: `bh overlay`
 
 [project.scripts]
 bh = "bundlehunter.cli:main"

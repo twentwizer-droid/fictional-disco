@@ -127,6 +127,14 @@ def create_app(service: Service, password: str | None = None) -> web.Application
         text = service.scalp_eval()
         return _json({"text": text, "status": service.status().get("scalp")})
 
+    async def learned(request: web.Request) -> web.Response:
+        return _json(service.learned())
+
+    async def learn_now(request: web.Request) -> web.Response:
+        require_intent(request)
+        text = service.learn()  # always the export/ folder next to the bot: the page cannot pick a path
+        return _json({"text": text, "learned": service.learned()})
+
     async def positions(request: web.Request) -> web.Response:
         return _json(service.positions())
 
@@ -143,6 +151,8 @@ def create_app(service: Service, password: str | None = None) -> web.Application
         web.get("/api/traders", traders),
         web.post("/api/paper", paper),
         web.post("/api/scalp/eval", scalp_eval),
+        web.get("/api/learned", learned),
+        web.post("/api/learn", learn_now),
     ])
     return app
 

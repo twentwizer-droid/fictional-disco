@@ -9,6 +9,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .analyzer import Analyzer, LaunchReport
 from .backtest import run_backtest
@@ -393,6 +394,23 @@ def cmd_scalp(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     print(format_result(r) if r else "no evaluation yet: bh scalp eval")
 
 
+def cmd_learn(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    """Learn entry rules / take profit from exported trades; promoted rules filter the scalper."""
+    from .learn import format_result, learn, load_dir, save
+
+    if not Path(args.path).exists():
+        raise SystemExit(f"{args.path} not found: put your exported CSV / JSON files there")
+    result = learn(load_dir(args.path), split=args.split, cost_pct=args.cost)
+    save(result)
+    print(format_result(result))
+
+
+def cmd_overlay(cfg: Config, store: Store, args: argparse.Namespace) -> None:
+    from .overlay import run_overlay
+
+    run_overlay(args.url or f"http://127.0.0.1:{cfg.web.port}", os.environ.get("BH_WEB_PASSWORD"))
+
+
 def cmd_clusters(cfg: Config, store: Store, args: argparse.Namespace) -> None:
     index = build_clusters(store, cfg.clusters)
     clusters = list(index.clusters.values())
@@ -626,6 +644,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("action", nargs="?", default="status", choices=["eval", "status"])
     s.add_argument("--split", type=float, default=None, help="share of oldest tokens used to choose (default 0.7)")
 
+    s = sub.add_parser("learn", help="learn entry rules from exported trades (CSV/JSON) in a folder")
+    s.add_argument("path", nargs="?", default="export")
+    s.add_argument("--split", type=float, default=0.7, help="share of oldest trades to learn on (default 0.7)")
+    s.add_argument("--cost", type=float, default=0.0,
+                   help="%% to subtract from each trade if the export shows results before fees")
+
+    s = sub.add_parser("overlay", help="desktop overlay window (needs: pip install PySide6-Essentials)")
+    s.add_argument("--url", default=None, help="web panel address, default http://127.0.0.1:<web.port>")
+
     s = sub.add_parser("paper", help="paper money: balance | deposit X | withdraw X | reset X | history")
     s.add_argument("action", nargs="?", default="balance", choices=["balance", "deposit", "withdraw", "reset", "history"])
     s.add_argument("amount", nargs="?", type=float)
@@ -661,6 +688,8 @@ def main(argv: list[str] | None = None) -> None:
         "serve": cmd_serve,
         "paper": cmd_paper,
         "scalp": cmd_scalp,
+        "learn": cmd_learn,
+        "overlay": cmd_overlay,
         "wallet": cmd_wallet,
         "positions": cmd_positions,
     }

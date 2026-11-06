@@ -146,6 +146,7 @@ class ScalpStrategy:
         self.recorder = None  # (event, (person, score) | None) -> None: feeds bh scalp eval
         self.check_recorder = None  # (mint, ok, reason, metrics) -> None
         self.validated: dict | None = None  # result of the last evaluation (see scalp_lab)
+        self.learned: list = []  # learn.Rule list from a promoted `bh learn` result
         self.live = False  # set by the runner from the broker
         self.traders: dict[str, tuple[str, float | None]] = dict(traders or {})  # wallet -> (person, score)
         self.watches: dict[str, ScalpWatch] = {}
@@ -216,10 +217,17 @@ class ScalpStrategy:
             "entries_last_hour": sum(1 for t in self.entries if now - t < 3600),
             "watching": [
                 {"mint": w.mint, "smart": sorted(w.smart), "age_s": now - w.started_ts, "blocked": w.block_reason,
-                 "in_position": w.mint in self.positions}
+                 "in_position": w.mint in self.positions, "price": w.last_price,
+                 "grade": grade(w.block_reason, w.check_ok, len(w.smart)), "stars": min(5, len(w.smart))}
                 for w in self.watches.values()
             ],
-            "skipped": [{"ts": ts, "mint": m, "why": why} for ts, m, why in list(self.skipped)[-15:]],
+            "positions": [
+                {"mint": m, "entry": p.entry_price, "price": (self.watches[m].last_price if m in self.watches else None),
+                 "opened_ts": p.entry_ts, "size_sol": p.size_sol, "tp": p.tp, "sl": p.sl}
+                for m, p in self.positions.items()
+            ],
+            "skipped": [{"ts": ts, "mint": m, "why": why} for ts, m, why in list(self.skipped)[-30:]],
+            "learned": [r.text() for r in self.learned],
             "exit_mode": self.cfg.exit_mode,
             "validated": self.validated,
             "gate": self.gate_block(self.live, now) or "ok",
@@ -349,6 +357,12 @@ class ScalpStrategy:
         if opened and w.last_price > opened * (1 + cfg.max_spike_pct):
             w.block_reason = f"вертикальна свіча +{w.last_price / opened - 1:.0%} за {cfg.spike_window_s:.0f} с"
             return []
+
+        feats = {**m, "smart_count": len(w.smart), "buyers": mo.buyers}
+        for rule in self.learned:
+            if rule.ok(feats) is False:
+                w.block_reason = f"вивчене правило: {rule.text()}"
+                return []
 
         w.pending = True
         w.block_reason = ""
@@ -515,3 +529,21 @@ class ScalpStrategy:
         pos = self.positions.get(mint)
         if pos:
             pos.closing = False
+
+
+_WAIT = ("немає підтвердження", "сильних гаманців")
+_RISK = ("пауза", "охолодження", "ліміт", "максимум", "забагато", "валідац", "перевір")
+
+
+def grade(block_reason: str, check_ok: bool | None, smart: int) -> str:
+    """A ready to buy, B waits only for confirmation, C waits for checks or risk limits,
+    D blocked by a red flag right now (chase, spike, bundlers, a learned rule)."""
+    if check_ok is False:
+        return "E"
+    if not block_reason:
+        return "A" if check_ok else "C"
+    if block_reason.startswith(_WAIT):
+        return "B" if smart >= 1 else "C"
+    if block_reason.startswith("чекаю") or any(k in block_reason for k in _RISK):
+        return "C"
+    return "D"

@@ -32,6 +32,7 @@ from .parser import parse_transaction
 from .rpc import SolanaRpc
 from .storage import Store
 from .scalp import ScalpStrategy
+from .learn import live_rules, load_learned
 from .scalp_lab import evaluate, format_result, load_validated
 from .strategy import Action, Strategy
 from .traders import short, trader_stats
@@ -77,6 +78,7 @@ class BotRunner:
             self.scalper.recorder = self._record_scalp
             self.scalper.check_recorder = lambda m, ok, why, met: self.store.record_scalp_check(m, ok, why, met)
             self.apply_validation(load_validated())
+            self.apply_learned(load_learned())
         self._live_cap_warned = False
         self._seen: OrderedDict[tuple[str, str, str], None] = OrderedDict()
         self._recent_creates: OrderedDict[str, MarketEvent] = OrderedDict()
@@ -105,6 +107,11 @@ class BotRunner:
         self.scalper.validated = result
         if result and result.get("validated") and result.get("mode"):
             self.scalper.cfg.exit_mode = result["mode"]
+
+    def apply_learned(self, result: dict | None) -> None:
+        """Entry rules learned from your export (bh learn) filter the scalper, if they were promoted."""
+        if self.scalper:
+            self.scalper.learned = live_rules(result)
 
     async def _eval_loop(self) -> None:
         """Re-validate the scalper on fresh recordings every eval_every_s."""

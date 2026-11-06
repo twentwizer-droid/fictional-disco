@@ -309,9 +309,11 @@ function renderScalp(sc) {
       card("Збитків поспіль", sc.loss_streak),
       card("Входів за годину", sc.entries_last_hour)),
     renderValidation(sc),
+    renderLearn(),
     el("h3", {}, "Чекаю підтвердження"),
-    table(["Mint", "Сильні гаманці", "Відколи", "Чому ще не вхід"],
-      sc.watching.map((w) => ({ cells: [mint(w.mint), w.smart.join(", "), ago(Date.now() / 1000 - w.age_s),
+    table(["Оцінка", "Mint", "Сильні гаманці", "Відколи", "Чому ще не вхід"],
+      sc.watching.map((w) => ({ cells: [w.in_position ? "•" : tag(w.grade, GRADE_LVL[w.grade] || "info"), mint(w.mint),
+        w.smart.join(", "), ago(Date.now() / 1000 - w.age_s),
         w.in_position ? tag("у позиції", "green") : (w.blocked || "перевіряю")] }))),
     el("h3", {}, "Пропущені угоди (пропущена угода = 0 $ збитку)"),
     table(["Коли", "Mint", "Чому не входив"],
@@ -333,6 +335,36 @@ function renderValidation(sc) {
     el("button", { class: "btn", type: "button", onclick: runEval }, "Перевірити зараз"),
     el("span", { id: "eval-note", class: "muted" }, ""));
   return box;
+}
+
+const GRADE_LVL = { A: "green", B: "yellow", C: "info", D: "red", E: "red" };
+let lastLearned;  // keeps the report on screen between overview refreshes
+
+function renderLearn() {
+  const pre = el("pre", { class: "mono wallets" }, "Завантажую…");
+  const note = el("span", { class: "muted" }, "");
+  const show = (r) => {
+    lastLearned = r;
+    if (!r) { pre.textContent = "Ще не вчився. Поклади експорт своїх угод (CSV / JSON з колонками pnl %, капа, бандлери, холдери…) у папку export/ поруч із ботом і натисни кнопку."; return; }
+    const rules = (r.rules || []).map((x) => `  • ${x.text}${x.live ? "" : "  (лише підказка)"}`).join("\n") || "  (жодне правило не допомогло стабільно)";
+    const f = (s) => (s && s.n ? `${s.n} угод, середня ${signed(s.avg, 1)}%, медіана ${signed(s.median, 1)}%, у плюсі ${pct(s.win_rate, 0)}` : "0 угод");
+    pre.textContent = r.train == null ? r.why :
+      `Правила входу:\n${rules}\n${r.tp_pct ? `Тейк-профіт: +${r.tp_pct}%\n` : ""}\n` +
+      `Навчання: ${f(r.train)}\nПеревірка на нових: ${f(r.test)}\n   без правил: ${f(r.baseline_test)}\n\n` +
+      `${r.promoted ? "✅ Прийнято: скальпер фільтрує входи цими правилами" : "⛔ Не прийнято"}: ${r.why}`;
+  };
+  if (lastLearned !== undefined) show(lastLearned);
+  api("/api/learned").then(show).catch((err) => { pre.textContent = err.message; });
+  const run = async (ev) => {
+    const b = ev.currentTarget;
+    b.disabled = true;
+    note.textContent = "  Вчуся на export/…";
+    try { const res = await post("/api/learn"); show(res.learned); note.textContent = ""; }
+    catch (err) { note.textContent = `  Помилка: ${err.message}`; }
+    finally { b.disabled = false; }
+  };
+  return el("div", { class: "box" }, el("h3", {}, "Навчання на твоєму експорті"), pre,
+    el("button", { class: "btn", type: "button", onclick: run }, "Навчити з export/"), note);
 }
 
 async function runEval(ev) {

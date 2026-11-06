@@ -222,6 +222,8 @@ class Service:
             out["mode"] = "live" if self.runner.broker.live else "paper"
             out["tracked_wallets"] = len(strat.tracked_wallets())
             out["scalp"] = self.runner.scalper.status(time.time()) if self.runner.scalper else None
+            for row in (out["scalp"] or {}).get("watching", []) + (out["scalp"] or {}).get("positions", []):
+                row["symbol"] = (self.store.token(row["mint"]) or {}).get("symbol") or ""
             if not self.runner.broker.live:
                 out["paper"] = {"balance_sol": self.store.paper_balance(), "ledger": self.store.paper_ledger(10)}
             out["exit_mode"] = self.cfg.scalp.exit_mode
@@ -238,6 +240,20 @@ class Service:
                 for w in strat.watches.values()
             ]
         return out
+
+    def learned(self) -> dict[str, Any] | None:
+        from .learn import load_learned
+
+        return load_learned()
+
+    def learn(self, path: str = "export") -> str:
+        from .learn import format_result, learn, load_dir, save
+
+        result = learn(load_dir(path))
+        save(result)
+        if self.runner is not None:
+            self.runner.apply_learned(result)
+        return format_result(result)
 
     def scalp_eval(self) -> str:
         from .scalp_lab import evaluate, format_result

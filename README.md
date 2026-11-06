@@ -80,7 +80,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev,ai]"
 cp config.example.toml config.toml
 cp .env.example .env        # put your RPC URL in BH_RPC_URL
-pytest                      # 94 offline tests
+pytest                      # 111 offline tests
 ```
 
 Use a **paid RPC** (Helius, Triton, QuickNode…). The public endpoint is too
@@ -285,6 +285,19 @@ locally, so the key never leaves the process. It is sent as a **Jito bundle**
 `[swap, tip]` and, as a fallback, through RPC (one signature can only land once).
 The fill is read back from the chain.
 
+## Learn from your export, work from the overlay
+
+```bash
+bh learn                     # CSV / JSON trades in export/ -> data/learned_strategy.json
+pip install -e ".[overlay]" && bh overlay   # desktop overlay next to `bh serve`
+```
+
+`bh learn` sorts trades by time, learns at most 3 threshold rules ("bundlers <= 22%") and a take
+profit on the oldest 70%, and promotes them only if the newest 30% stay positive (avg and median)
+and beat taking every trade. Promoted rules on features the bot sees live filter scalper entries.
+The overlay polls the web API, shows a "Купити?" card graded A–E, positions with Axiom / Dex / CA,
+and never places orders (Enter opens Axiom, Esc skips). Details: docs/MANUAL_RU.md §5б–5в.
+
 ## Telegram bot and web panel (`bh serve`)
 
 `bh serve` is `bh run` plus a Telegram bot and a web panel, in one process. Both show the
@@ -442,7 +455,10 @@ All parameters are in `config.example.toml`.
 | `web.py`, `webui/` | web panel: aiohttp JSON API + one static page (Ukrainian UI) |
 | `i18n.py` | Ukrainian wording for strategy reasons and verdicts |
 | `walletsort.py` | sort / dedupe / categorize wallet-tracker exports (Axiom JSON in any encoding, TSV) |
-| `scalp.py` | scalping strategy (reason → confirmation → plan → exit → no revenge) |
+| `scalp.py` | scalping strategy (reason → confirmation → plan → exit → no revenge), A–E grade per watched token |
+| `scalp_lab.py` | replay validation of the scalper on unseen recorded tokens |
+| `learn.py` | `bh learn`: entry rules + take profit learned from your exported trades (`export/`), judged on the newest 30% |
+| `overlay.py` | `bh overlay`: always-on-top PySide6 window (Зараз / Поле / Потік / Журнал / Розбір / Ще) over the web API |
 | `traders.py` | trader watchlist stats (real PnL per token) and the signal engine |
 | `clusters.py` | union-find wallet clustering (funder, transfers, group-level co-bundling with Jaccard overlap to keep sniper bots out), per-cluster PnL / timing / partners |
 | `strategy.py` | pure decision logic (same code for live, paper, backtest) |
